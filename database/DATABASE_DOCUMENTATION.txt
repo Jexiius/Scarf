@@ -1,0 +1,1950 @@
+================================================================================
+SCARF RESTAURANT RECOMMENDATION APP - DATABASE DOCUMENTATION
+================================================================================
+
+Project: Natural Language Restaurant Recommendation System
+Database: PostgreSQL 15+ with Extensions
+Last Updated: 2025-10-27
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+1. Overview & Architecture Philosophy
+2. Required PostgreSQL Extensions
+3. Table Schemas & Design Rationale
+   3.1  restaurants
+   3.2  restaurant_features
+   3.3  reviews
+   3.4  feature_extractions
+   3.5  users
+   3.6  user_queries
+   3.7  saved_restaurants
+   3.8  processing_queue
+4. Relationships & Data Flow
+5. Indexing Strategy
+6. Usage Patterns & Queries
+7. Data Pipeline Overview
+8. Performance Considerations
+9. Future Extensibility
+
+================================================================================
+1. OVERVIEW & ARCHITECTURE PHILOSOPHY
+================================================================================
+
+CORE CONCEPT:
+This database supports a feature-based restaurant recommendation system that
+uses natural language processing to match user queries with restaurants based
+on 32 predefined attributes (romantic, cozy, good_for_dates, etc.).
+
+KEY DESIGN PRINCIPLES:
+
+1. SEPARATION OF CONCERNS
+   - Base restaurant data (restaurants) separate from derived features
+   - Raw reviews separate from processed feature extractions
+   - User data isolated from restaurant data
+
+2. BACKEND PROCESSING, NOT SQL SCORING
+   - SQL handles fast filtering on objective criteria (price, distance, cuisine)
+   - Backend handles scoring, ranking, and LLM interactions
+   - Database returns raw feature data for backend to process
+
+3. TRACEABILITY & DEBUGGING
+   - Track individual review contributions (feature_extractions)
+   - Log all queries and user interactions (user_queries)
+   - Maintain processing pipeline state (processing_queue)
+
+4. PERFORMANCE FIRST
+   - Indexes optimized for common filtering patterns
+   - Geospatial queries use PostgreSQL's earthdistance extension
+   - Separate tables prevent bloat and enable targeted updates
+
+5. DATA QUALITY TRACKING
+   - Confidence scores at multiple levels
+   - Processing timestamps and model versions
+   - Enable data quality monitoring and improvement
+
+================================================================================
+2. REQUIRED POSTGRESQL EXTENSIONS
+================================================================================
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+  Purpose: Generate UUIDs for primary keys
+  Usage: DEFAULT gen_random_uuid() in id columns
+
+CREATE EXTENSION IF NOT EXISTS "cube";
+CREATE EXTENSION IF NOT EXISTS "earthdistance";
+  Purpose: Fast geospatial distance calculations
+  Usage: ll_to_earth() and earth_distance() functions for radius searches
+  Why: Much faster than haversine formula in application code
+
+================================================================================
+3. TABLE SCHEMAS & DESIGN RATIONALE
+================================================================================
+
+--------------------------------------------------------------------------------
+3.1 TABLE: restaurants
+--------------------------------------------------------------------------------
+
+PURPOSE:
+Stores core, factual information about restaurants that rarely changes.
+This is your "source of truth" for restaurant identity and basic attributes.
+
+COLUMNS:
+
+id (UUID, PRIMARY KEY)
+  - Unique identifier for each restaurant
+  - Using UUID instead of SERIAL for distributed system compatibility
+  - Generated automatically via gen_random_uuid()
+
+name (TEXT, NOT NULL)
+  - Restaurant's display name
+  - Required field as it's essential for user display
+
+google_place_id (TEXT, UNIQUE)
+  - Google Places API identifier
+  - UNIQUE constraint prevents duplicate imports
+  - Nullable because you might add restaurants from other sources later
+  - Acts as external system reference key
+
+latitude (DECIMAL(10, 8), NOT NULL)
+longitude (DECIMAL(11, 8), NOT NULL)
+  - Precise geographic coordinates
+  - DECIMAL preserves exact coordinates (FLOAT would lose precision)
+  - 10,8 = 8 decimal places (precise to ~1mm)
+  - Required for distance-based filtering
+  - Used with earthdistance extension for radius queries
+
+address (TEXT)
+city (TEXT)
+state (TEXT)
+zip_code (TEXT)
+  - Structured address components
+  - Nullable because not all sources provide complete addresses
+  - Separate city field enables city-level filtering without parsing
+  - Consider adding country field if expanding internationally
+
+price_level (INTEGER, CHECK BETWEEN 1 AND 4)
+  - Matches Google Places pricing convention ($, $$, $$$, $$$$)
+  - CHECK constraint enforces valid values
+  - Used for hard filtering ("not too expensive")
+  - Nullable for restaurants without pricing data
+
+google_rating (DECIMAL(2, 1))
+  - Overall rating from Google (e.g., 4.3)
+  - DECIMAL(2,1) = one decimal place (e.g., 4.3, not 4.27)
+  - Used as baseline quality filter
+  - Nullable for restaurants without ratings yet
+
+google_review_count (INTEGER)
+  - Number of reviews on Google
+  - Indicates confidence in google_rating
+  - Used to filter out restaurants with insufficient data
+
+cuisine_tags (TEXT[])
+  - Array of cuisine types: ['Italian', 'Pizza', 'Casual']
+  - Array type enables efficient overlap queries (&&)
+  - Supports multiple cuisines per restaurant
+  - Consider standardizing tags (e.g., 'Italian' not 'italian')
+
+phone (TEXT)
+website (TEXT)
+  - Contact information for restaurant detail pages
+  - TEXT instead of VARCHAR for simplicity
+  - Nullable as not all restaurants have websites
+
+photo_urls (TEXT[])
+  - Array of image URLs from Google Places
+  - Stored as URLs, not binary data (images hosted externally)
+  - Consider first URL as primary photo
+  - Array allows multiple photos without separate table
+
+hours (JSONB)
+  - Operating hours stored as JSON
+  - Example: {"monday": "9:00-22:00", "tuesday": "9:00-22:00"}
+  - JSONB enables querying (e.g., find restaurants open now)
+  - Flexible format accommodates varying data structures
+
+is_active (BOOLEAN, DEFAULT true)
+  - Soft delete flag
+  - Allows filtering out closed restaurants without losing data
+  - Indexed for fast filtering in queries
+  - Prefer this over hard deletes for data integrity
+
+created_at (TIMESTAMP, DEFAULT NOW())
+updated_at (TIMESTAMP, DEFAULT NOW())
+  - Audit trail for record lifecycle
+  - updated_at should be refreshed by backend on updates
+  - Useful for debugging and data quality monitoring
+
+last_scraped_at (TIMESTAMP)
+  - Tracks when data was last refreshed from external sources
+  - Enables identifying stale data that needs re-scraping
+  - Helps schedule periodic updates
+
+DESIGN DECISIONS:
+
+1. Why separate from features?
+   - Restaurant metadata changes rarely (name, location)
+   - Feature scores need frequent updates (new reviews)
+   - Separating allows targeted updates without touching base data
+
+2. Why store photos as URLs not binary?
+   - Images hosted on Google's CDN (fast, reliable, free)
+   - No need to pay for storage/bandwidth
+   - Can cache locally later if needed
+
+3. Why TEXT[] for arrays instead of separate tables?
+   - Simpler schema for relatively small arrays
+   - PostgreSQL array operators (&&) are very efficient
+   - Avoids JOIN overhead for simple lookups
+   - Trade-off: harder to enforce referential integrity
+
+INDEXES:
+
+idx_restaurants_location (GIST on ll_to_earth(latitude, longitude))
+  - Enables fast radius searches ("within 10 miles")
+  - GIST index type optimized for geometric operations
+  - Critical for primary use case: find restaurants near user
+
+idx_restaurants_price_rating (price_level, google_rating)
+  - Composite index for common filter combination
+  - Speeds up queries like "3-star restaurants under $$$"
+  - Column order matters: price_level first (more selective)
+
+idx_restaurants_cuisine (GIN on cuisine_tags)
+  - GIN index optimized for array containment queries
+  - Enables fast filtering by cuisine type
+  - Supports && (overlap) and @> (contains) operators
+
+idx_restaurants_active (is_active) WHERE is_active = true
+  - Partial index only on active restaurants
+  - Smaller index size, faster queries
+  - Most queries filter on active = true
+
+--------------------------------------------------------------------------------
+3.2 TABLE: restaurant_features
+--------------------------------------------------------------------------------
+
+PURPOSE:
+Stores the 32 computed feature scores (0.0-1.0) that represent a restaurant's
+characteristics based on review analysis. This is the heart of your matching
+system.
+
+DESIGN PHILOSOPHY:
+- One row per restaurant (enforced by UNIQUE constraint on restaurant_id)
+- All features stored as individual columns for type safety and performance
+- Scores derived from analyzing reviews via LLM
+- Updated periodically as new reviews are processed
+
+FEATURE CATEGORIES & COLUMNS:
+
+ATMOSPHERE (6 features):
+  romantic (DECIMAL(3,2), 0.0-1.0)
+    - How romantic/intimate the atmosphere is
+    - High score: dimmed lighting, quiet, couples-oriented
+    - Used for date night queries
+  
+  cozy (DECIMAL(3,2), 0.0-1.0)
+    - Warm, comfortable, inviting feeling
+    - High score: comfortable seating, warm lighting, homey feel
+    - Different from romantic: can be cozy without being romantic
+  
+  casual (DECIMAL(3,2), 0.0-1.0)
+    - Relaxed, informal atmosphere
+    - Inverse relationship with formality (but not strictly)
+    - High score: come-as-you-are vibe, no dress code
+  
+  noise_level (DECIMAL(3,2), 0.0-1.0)
+    - 0.0 = very quiet, 1.0 = very loud
+    - Important for conversation-focused dining
+    - Note: High noise can be positive (lively) or negative (can't talk)
+  
+  energy_level (DECIMAL(3,2), 0.0-1.0)
+    - 0.0 = calm/subdued, 1.0 = vibrant/energetic
+    - Different from noise: can be energetic without being loud
+    - High score: upbeat music, busy atmosphere, exciting vibe
+  
+  crowdedness (DECIMAL(3,2), 0.0-1.0)
+    - How packed/busy the restaurant typically is
+    - High score: always full, hard to get tables
+    - Can indicate popularity or claustrophobia depending on context
+
+OCCASION (5 features):
+  good_for_dates (DECIMAL(3,2), 0.0-1.0)
+    - Explicitly mentioned as good for romantic dates
+    - Combination of romantic + service + ambiance
+    - High score: reviews mention "perfect date spot"
+  
+  good_for_groups (DECIMAL(3,2), 0.0-1.0)
+    - Accommodates larger parties well
+    - High score: large tables, shareable plates, group-friendly
+    - Used for "dinner with friends" queries
+  
+  family_friendly (DECIMAL(3,2), 0.0-1.0)
+    - Welcoming to children
+    - High score: kids menu, high chairs, tolerant atmosphere
+    - Low score doesn't mean hostile, just not focused on families
+  
+  business_appropriate (DECIMAL(3,2), 0.0-1.0)
+    - Suitable for business meetings/lunches
+    - High score: quiet enough for conversation, professional atmosphere
+    - Consider: Wi-Fi availability, table space, noise level
+  
+  celebration_worthy (DECIMAL(3,2), 0.0-1.0)
+    - Good for birthdays, anniversaries, special occasions
+    - High score: upscale feel, attentive service, memorable experience
+    - Different from formal: can be celebration-worthy but casual
+
+SERVICE (2 features):
+  fast_service (DECIMAL(3,2), 0.0-1.0)
+    - Speed of service from ordering to eating
+    - High score: quick turnaround, efficient staff
+    - Important for lunch rushes, quick meals
+  
+  attentive_service (DECIMAL(3,2), 0.0-1.0)
+    - Thoughtful, responsive, personalized service
+    - High score: staff remembers preferences, anticipates needs
+    - Not mutually exclusive with fast service
+
+FOOD (7 features):
+  authentic (DECIMAL(3,2), 0.0-1.0)
+    - Perceived authenticity of cuisine
+    - High score: traditional recipes, cultural accuracy
+    - Subjective but important for cuisine-specific searches
+  
+  creative_menu (DECIMAL(3,2), 0.0-1.0)
+    - Innovative, unique, unexpected dishes
+    - High score: fusion concepts, chef-driven, experimental
+    - Opposite end from traditional comfort food
+  
+  comfort_food (DECIMAL(3,2), 0.0-1.0)
+    - Familiar, satisfying, homestyle cooking
+    - High score: classic dishes, hearty portions, nostalgic
+    - Can overlap with casual and good_value
+  
+  healthy_options (DECIMAL(3,2), 0.0-1.0)
+    - Availability of nutritious, lighter options
+    - High score: salads, grilled options, fresh ingredients
+    - Important for health-conscious users
+  
+  portions_large (DECIMAL(3,2), 0.0-1.0)
+    - Generous serving sizes
+    - High score: leftovers common, shareable portions
+    - Often correlates with good_value
+  
+  vegan_friendly (DECIMAL(3,2), 0.0-1.0)
+    - Availability and quality of vegan options
+    - High score: dedicated vegan menu, knowledgeable staff
+    - Critical filter for dietary restrictions
+  
+  photogenic_food (DECIMAL(3,2), 0.0-1.0)
+    - Visual appeal, Instagram-worthy plating
+    - High score: beautiful presentation, colorful dishes
+    - Important for social media generation
+
+AMBIANCE (4 features):
+  decor_quality (DECIMAL(3,2), 0.0-1.0)
+    - Interior design and aesthetic appeal
+    - High score: thoughtful design, stylish furnishings
+    - Contributes to overall experience beyond food
+  
+  photo_friendly_lighting (DECIMAL(3,2), 0.0-1.0)
+    - Lighting quality for taking photos
+    - High score: well-lit, natural light, flattering
+    - Important for Instagram culture
+  
+  nice_views (DECIMAL(3,2), 0.0-1.0)
+    - Quality of scenery/views from restaurant
+    - High score: waterfront, skyline, scenic location
+    - Can be primary draw for some restaurants
+  
+  trendy (DECIMAL(3,2), 0.0-1.0)
+    - Current popularity, fashionable, "in" status
+    - High score: buzzy, talked about, Instagram hotspot
+    - Time-sensitive: needs regular updating
+
+PRACTICAL (4 features):
+  outdoor_seating (DECIMAL(3,2), 0.0-1.0)
+    - Availability and quality of outdoor dining
+    - High score: patio, rooftop, sidewalk seating
+    - Seasonal importance varies
+  
+  easy_parking (DECIMAL(3,2), 0.0-1.0)
+    - Convenience of parking options
+    - High score: dedicated lot, valet, street parking available
+    - More important in suburban/car-dependent areas
+  
+  reservations_needed (DECIMAL(3,2), 0.0-1.0)
+    - Difficulty getting a table without reservation
+    - High score: always booked, need to plan ahead
+    - Indicator of popularity but also planning requirement
+  
+  late_night (DECIMAL(3,2), 0.0-1.0)
+    - Open late, serves food after typical hours
+    - High score: kitchen open past 11pm
+    - Important for night owls, post-event dining
+
+VALUE (4 features):
+  formality (DECIMAL(3,2), 0.0-1.0)
+    - Dress code, etiquette expectations
+    - 0.0 = very casual, 1.0 = very formal
+    - High score: dress code, fine dining expectations
+  
+  good_value (DECIMAL(3,2), 0.0-1.0)
+    - Price-to-quality ratio
+    - High score: reasonable prices for quality received
+    - Can be high even for expensive restaurants
+  
+  splurge_worthy (DECIMAL(3,2), 0.0-1.0)
+    - Worth spending extra money for special experience
+    - High score: exceptional quality justifies premium price
+    - Different from good_value: this is about justified luxury
+  
+  popularity (DECIMAL(3,2), 0.0-1.0)
+    - Overall buzz, demand, community reputation
+    - High score: always busy, well-known, recommended often
+    - Combination of reviews, ratings, and buzz
+
+METADATA COLUMNS:
+
+confidence_score (DECIMAL(3,2))
+  - Overall confidence in feature scores (0.0-1.0)
+  - Calculated based on:
+    * Number of reviews analyzed
+    * Consistency of scores across reviews
+    * Recency of reviews
+  - Used to filter out restaurants with insufficient data
+  - Backend should calculate and update this
+
+review_count_analyzed (INTEGER)
+  - How many reviews were processed to generate these scores
+  - Higher count = more reliable scores
+  - Used in confidence calculation
+  - Minimum threshold (e.g., 10) ensures quality
+
+last_updated_at (TIMESTAMP, DEFAULT NOW())
+  - When these feature scores were last computed
+  - Enables scheduling periodic re-computation
+  - Helps identify stale data
+
+model_version (TEXT)
+  - Tracks which LLM/prompt version generated these scores
+  - Example: "gpt-4o-mini-v1.2"
+  - Critical for A/B testing and improving extraction
+  - Enables reprocessing when model improves
+
+DESIGN DECISIONS:
+
+1. Why individual columns instead of JSONB?
+   - Type safety: CHECK constraints ensure valid ranges
+   - Query performance: Can index individual columns
+   - Clarity: Schema documents expected features
+   - Validation: Database enforces data quality
+   
+   Trade-off: Adding features requires schema migration
+   Solution: Could add additional_features JSONB for experimentation
+
+2. Why DECIMAL(3,2)?
+   - Exact precision (unlike FLOAT)
+   - Range 0.00 to 1.00 (3 total digits, 2 after decimal)
+   - CHECK constraints enforce valid range
+   - Example values: 0.00, 0.50, 0.87, 1.00
+
+3. Why nullable features?
+   - New restaurants may not have all features computed yet
+   - Some features may not apply to all restaurants
+   - Backend can handle NULL as "unknown" vs 0.0 as "definitely low"
+
+4. Why one-to-one with restaurants?
+   - UNIQUE constraint on restaurant_id
+   - Simplifies queries (no need to GROUP BY)
+   - Each restaurant has exactly one feature profile
+   - Update in place rather than versioning
+
+5. Should features be normalized?
+   Considered: Separate restaurant_features table with feature_name, score
+   Rejected because:
+   - Would require 32 rows per restaurant
+   - Makes queries complex (need to pivot)
+   - Harder to ensure all features exist
+   - Performance overhead of JOINs
+
+INDEXES:
+
+idx_features_restaurant (restaurant_id)
+  - Primary lookup: get features for specific restaurant
+  - Used when fetching filtered restaurants + their features
+
+idx_features_romantic (romantic) WHERE romantic > 0.5
+  - Partial index for high-value features
+  - Smaller index, faster queries
+  - Only indexes restaurants where feature is notable
+  - Consider adding for other commonly filtered features
+
+NOTE ON INDEXING STRATEGY:
+- Could add indexes for other high-value features (good_for_dates, casual)
+- Monitor query patterns to decide which features need indexes
+- Partial indexes (WHERE score > threshold) save space
+- Consider index maintenance cost vs query performance benefit
+
+--------------------------------------------------------------------------------
+3.3 TABLE: reviews
+--------------------------------------------------------------------------------
+
+PURPOSE:
+Stores raw review text scraped from Google, Yelp, or other sources. This is
+the source material for feature extraction. Reviews are processed once to
+extract features, but kept for potential re-processing with improved models.
+
+COLUMNS:
+
+id (UUID, PRIMARY KEY)
+  - Unique identifier for each review
+  - UUID enables distributed scraping without collisions
+
+restaurant_id (UUID, NOT NULL, FOREIGN KEY)
+  - Links review to its restaurant
+  - ON DELETE CASCADE: removing restaurant removes its reviews
+  - Indexed for fast "get all reviews for restaurant" queries
+
+author_name (TEXT)
+  - Review author's name/username
+  - Nullable: some sources provide anonymous reviews
+  - Not critical for feature extraction but useful for context
+
+text (TEXT, NOT NULL)
+  - The actual review content
+  - This is what gets sent to LLM for feature extraction
+  - Required: no point storing review without content
+  - Consider TEXT vs VARCHAR: TEXT for unlimited length
+
+rating (INTEGER, CHECK BETWEEN 1 AND 5)
+  - Star rating from reviewer (1-5 scale)
+  - CHECK constraint ensures valid values
+  - Used as signal in feature extraction (5-star reviews weighted differently)
+  - Consider normalizing different rating scales (some use 1-10)
+
+source (TEXT, NOT NULL)
+  - Where review came from: 'google', 'yelp', 'tripadvisor', etc.
+  - Used for source attribution and quality filtering
+  - Consider ENUM type or CHECK constraint for valid sources
+  - Part of uniqueness constraint with source_review_id
+
+source_review_id (TEXT, NOT NULL)
+  - External ID from source platform
+  - Example: Google review ID, Yelp review ID
+  - UNIQUE constraint (with source) prevents duplicate imports
+  - Nullable in theory but should always be captured
+
+review_url (TEXT)
+  - Direct link to review on source platform
+  - Useful for verification and attribution
+  - Nullable: not all sources provide stable URLs
+
+published_at (TIMESTAMP)
+  - When review was originally published
+  - Used for recency weighting in feature aggregation
+  - Nullable: not all sources provide dates
+  - Consider timezone handling (store as UTC)
+
+scraped_at (TIMESTAMP, DEFAULT NOW())
+  - When we imported this review
+  - Useful for tracking scraping progress
+  - Different from published_at: scraping happens later
+
+is_processed (BOOLEAN, DEFAULT false)
+  - Has this review been sent to LLM for feature extraction?
+  - Used to find reviews that need processing
+  - Indexed for fast "get unprocessed reviews" queries
+  - Set to true after successful feature extraction
+
+processed_at (TIMESTAMP)
+  - When feature extraction completed
+  - Nullable until processing happens
+  - Useful for processing rate monitoring
+
+DESIGN DECISIONS:
+
+1. Why store reviews separately from feature_extractions?
+   - Source of truth: reviews are immutable external data
+   - Re-processable: can re-extract features with better models
+   - Auditable: can verify feature extraction against source
+   - Different lifecycle: reviews scraped once, features recomputed
+
+2. Why track processing status?
+   - Enables incremental processing (process new reviews as they arrive)
+   - Idempotent operations (don't reprocess already handled reviews)
+   - Failure recovery (identify reviews that failed processing)
+   - Queue management (prioritize unprocessed reviews)
+
+3. Why composite UNIQUE constraint?
+   - Prevents duplicate imports from same source
+   - Allows same review_id from different sources (unlikely but possible)
+   - Example: UNIQUE(source='google', source_review_id='ChIJ...')
+
+4. Scraping frequency considerations:
+   - Google: Rate-limited, fetch periodically (weekly/monthly)
+   - Store all historical reviews, not just recent
+   - Flag stale restaurants (no reviews in 6+ months)
+   - Consider incremental scraping (only new reviews since last_scraped_at)
+
+INDEXES:
+
+idx_reviews_restaurant (restaurant_id)
+  - Fast lookup: "get all reviews for restaurant X"
+  - Used during feature aggregation
+  - High cardinality: many reviews per restaurant
+
+idx_reviews_unprocessed (is_processed) WHERE is_processed = false
+  - Partial index for queue processing
+  - Find next batch of reviews to process
+  - Small index: only unprocessed reviews
+  - Critical for processing pipeline efficiency
+
+idx_reviews_published (published_at DESC)
+  - Fast sorting by date
+  - Used for recency-weighted aggregation
+  - DESC order: most recent first (common query pattern)
+  - Consider whether NULL values should be indexed
+
+UNIQUE CONSTRAINT:
+UNIQUE(source, source_review_id)
+  - Prevents duplicate imports
+  - Example: Can't import same Google review twice
+  - Different sources can have same ID (edge case)
+
+--------------------------------------------------------------------------------
+3.4 TABLE: feature_extractions
+--------------------------------------------------------------------------------
+
+PURPOSE:
+Records the individual feature scores extracted from each review. This creates
+a traceable link from review → features → aggregated restaurant scores.
+Enables debugging, re-aggregation, and understanding feature provenance.
+
+COLUMNS:
+
+id (UUID, PRIMARY KEY)
+  - Unique identifier for each extraction record
+  - One extraction per review (ideally)
+
+review_id (UUID, NOT NULL, FOREIGN KEY)
+  - Links to the specific review that was analyzed
+  - ON DELETE CASCADE: removing review removes its extractions
+  - Used to trace features back to source text
+
+restaurant_id (UUID, NOT NULL, FOREIGN KEY)
+  - Denormalized from reviews table for query performance
+  - Enables fast "get all extractions for restaurant" without JOIN
+  - ON DELETE CASCADE: removing restaurant removes extractions
+  - Trade-off: Redundant data vs query speed
+
+features (JSONB, NOT NULL)
+  - The extracted feature scores from this specific review
+  - Example: {"romantic": 0.9, "noise_level": 0.3, "cozy": 0.8}
+  - JSONB vs TEXT: Queryable, indexable, type-safe
+  - Not all 32 features present: only what review mentions
+  - Structure: { "feature_name": numeric_score }
+
+extraction_confidence (DECIMAL(3,2))
+  - LLM's confidence in this extraction (0.0-1.0)
+  - Some reviews clearly express features, others ambiguous
+  - Used to weight extractions during aggregation
+  - High confidence = explicit mentions, Low = inferred
+
+model_used (TEXT)
+  - Which LLM generated this extraction
+  - Example: "gpt-4o-mini", "gpt-4o", "claude-3-opus"
+  - Tracks model evolution and enables comparison
+  - Used for A/B testing different models
+
+prompt_version (TEXT)
+  - Version of extraction prompt used
+  - Example: "v1.0", "v1.2-with-examples"
+  - Enables experimenting with prompt engineering
+  - Critical for reproducibility and improvement
+
+extracted_at (TIMESTAMP, DEFAULT NOW())
+  - When this extraction was performed
+  - Used for recency-weighted aggregation
+  - Helps identify stale extractions that need refreshing
+
+tokens_used (INTEGER)
+  - How many tokens were consumed by this extraction
+  - Used for cost tracking and optimization
+  - Helps identify expensive reviews (very long text)
+
+cost_usd (DECIMAL(10,6))
+  - Actual cost of this API call
+  - Enables accurate cost monitoring
+  - Example: 0.000124 (fractions of a cent)
+  - DECIMAL(10,6): up to 6 decimal places for precision
+
+DESIGN DECISIONS:
+
+1. Why JSONB for features instead of 32 columns?
+   Pros:
+   - Flexible: Reviews don't mention all features
+   - Compact: No NULL columns for unmentioned features
+   - Evolvable: Can add new features without schema change
+   - Storage-efficient: Only store mentioned features
+   
+   Cons:
+   - Less type-safe than columns
+   - Slightly slower queries
+   - Requires application-level validation
+   
+   Decision: Flexibility outweighs type safety for this use case
+
+2. Why denormalize restaurant_id?
+   - Alternative: JOIN through reviews table
+   - Benefit: Fast "get all extractions for restaurant" queries
+   - Cost: 16 bytes per row (UUID overhead)
+   - Used in aggregation: "aggregate features for restaurant X"
+   - Trade-off accepted: Speed over slight redundancy
+
+3. Why track model and prompt versions?
+   - LLMs evolve: GPT-4o-mini today != GPT-4o-mini in 6 months
+   - Prompts improve: Need to know which extractions used old prompts
+   - A/B testing: Compare extraction quality across versions
+   - Re-processing decisions: "Re-extract all v1.0 prompt extractions"
+   - Example query: "Which restaurants need re-extraction with v2.0?"
+
+4. Why store individual extractions vs only aggregates?
+   Benefits:
+   - Debugging: "Why did this restaurant get romantic=0.9?"
+   - Re-aggregation: Can change aggregation formula without re-extraction
+   - Quality control: Identify outlier extractions
+   - Explainability: Show users which reviews contributed to features
+   - Cost tracking: Monitor per-review extraction costs
+   
+   Storage cost:
+   - ~500 bytes per extraction (JSONB + metadata)
+   - 50 reviews × 1000 restaurants = 25MB (negligible)
+
+5. Aggregation strategy:
+   - Weighted average by: recency + confidence + rating
+   - Example: Recent 5-star review with high confidence > Old 3-star low confidence
+   - Implemented in backend, not SQL (for flexibility)
+
+USAGE PATTERN - AGGREGATION EXAMPLE:
+
+To compute restaurant_features from feature_extractions:
+
+1. Fetch all extractions for restaurant
+2. For each feature (romantic, cozy, etc.):
+   a. Filter extractions that mention this feature
+   b. Weight by: recency × confidence × (rating/5)
+   c. Compute weighted average
+   d. Consider outlier removal (e.g., drop extreme values)
+3. Calculate overall confidence based on sample size and consistency
+4. Update restaurant_features table
+
+INDEXES:
+
+idx_extractions_review (review_id)
+  - Fast lookup: "get extraction for specific review"
+  - Used for debugging and verification
+  - Generally one-to-one: one extraction per review
+
+idx_extractions_restaurant (restaurant_id)
+  - Critical: "get all extractions for restaurant" during aggregation
+  - High-traffic query during feature updates
+  - Many extractions per restaurant
+
+idx_extractions_date (extracted_at DESC)
+  - Monitoring: Recent extraction activity
+  - Identifying stale extractions
+  - DESC order: most recent first
+
+POTENTIAL JSONB INDEX:
+CREATE INDEX idx_extractions_features ON feature_extractions USING GIN (features);
+  - Enables queries like: "Find reviews mentioning romantic > 0.8"
+  - Useful for debugging and analysis
+  - Consider adding if you need feature-level queries
+
+--------------------------------------------------------------------------------
+3.5 TABLE: users
+--------------------------------------------------------------------------------
+
+PURPOSE:
+Stores user account information, preferences, and subscription status. This
+enables personalized recommendations, saved restaurants, and premium features.
+
+COLUMNS:
+
+id (UUID, PRIMARY KEY)
+  - Unique user identifier
+  - Used across all user-related tables
+  - Consider syncing with external auth provider (Clerk, Supabase)
+
+email (TEXT, UNIQUE, NOT NULL)
+  - User's email address
+  - Primary authentication identifier
+  - UNIQUE constraint: one account per email
+  - Consider case-insensitivity (store lowercase)
+
+password_hash (TEXT)
+  - Hashed password (bcrypt, argon2, etc.)
+  - NEVER store plain text passwords
+  - Nullable if using OAuth/external auth exclusively
+  - Consider removing if using auth provider (Clerk handles this)
+
+email_verified (BOOLEAN, DEFAULT false)
+  - Email verification status
+  - Prevent abuse from fake accounts
+  - Gate certain features behind verification
+  - Send verification email on signup
+
+name (TEXT)
+  - User's display name
+  - Optional: some users prefer anonymity
+  - Used in UI personalization ("Hi, Sarah!")
+
+default_latitude (DECIMAL(10,8))
+default_longitude (DECIMAL(11,8))
+default_city (TEXT)
+  - User's preferred search location
+  - Auto-populate search radius from this point
+  - Fallback when geolocation unavailable/denied
+  - Consider privacy: store city-level, not exact address
+
+taste_profile (JSONB)
+  - Learned preferences from past queries and selections
+  - Example: {"preferred_features": {"romantic": 0.8, "casual": 0.2}}
+  - Built over time from user_queries table
+  - Used for personalized recommendations
+  - Structure: { "preferred_features": {}, "avoid_features": {} }
+
+favorite_cuisines (TEXT[])
+  - User's preferred cuisine types
+  - Learned from query history or explicitly set
+  - Example: ['Italian', 'Japanese', 'Mexican']
+  - Used to boost matching scores for preferred cuisines
+  - Consider showing these in user profile for editing
+
+subscription_tier (TEXT, DEFAULT 'free')
+  - Current subscription level
+  - Values: 'free', 'premium'
+  - Consider ENUM type or CHECK constraint
+  - Gates premium features (unlimited searches, advanced filters)
+
+subscription_starts_at (TIMESTAMP)
+subscription_ends_at (TIMESTAMP)
+  - Subscription period tracking
+  - NULL for free tier
+  - Used to check active subscription status
+  - Handle grace periods (e.g., 7 days after expiration)
+
+created_at (TIMESTAMP, DEFAULT NOW())
+  - User registration date
+  - Used for cohort analysis
+  - Track user lifetime value by cohort
+
+last_active_at (TIMESTAMP)
+  - Most recent interaction timestamp
+  - Updated on each API request
+  - Identify inactive users for re-engagement
+  - Used in retention analysis
+
+query_count (INTEGER, DEFAULT 0)
+  - Total queries made by user
+  - Increment on each search
+  - Used for rate limiting (free tier: 10/week)
+  - Track usage for conversion funnel
+
+DESIGN DECISIONS:
+
+1. Why store taste_profile as JSONB?
+   - Flexible structure: Can evolve without schema changes
+   - Complex data: Nested preferences, feature weights
+   - Not frequently queried: Only retrieved for user's own recommendations
+   - Example contents:
+     {
+       "preferred_features": {
+         "romantic": 0.85,
+         "cozy": 0.75,
+         "casual": 0.3
+       },
+       "avoid_features": {
+         "noisy": 0.2,
+         "crowded": 0.3
+       },
+       "price_preference": [2, 3],
+       "preferred_cuisines": ["Italian", "French"]
+     }
+
+2. How to build taste_profile?
+   - Analyze user_queries table periodically
+   - Extract common feature patterns from selected restaurants
+   - Weight recent selections higher
+   - Consider explicit feedback (thumbs up/down)
+   - Algorithm: Weighted average of features from saved/selected restaurants
+
+3. Authentication strategy:
+   Option A: Self-hosted (password_hash required)
+   - Full control, no external dependencies
+   - Responsibility for security, password resets
+   
+   Option B: Auth provider (Clerk, Supabase Auth)
+   - Remove password_hash column
+   - Store provider's user ID in external_auth_id column
+   - Simpler, more secure, OAuth support
+   
+   Recommendation: Use auth provider, remove password_hash
+
+4. Subscription management:
+   - Store subscription_ends_at, check on each request
+   - Consider: Stripe customer ID, payment method
+   - Add columns: stripe_customer_id, stripe_subscription_id
+   - Handle subscription lifecycle: trial, active, cancelled, expired
+
+5. Privacy considerations:
+   - Store minimal location data (city-level, not exact coordinates)
+   - Allow users to clear taste_profile
+   - GDPR compliance: Enable user data export and deletion
+   - Consider anonymizing query_logs after 90 days
+
+INDEXES:
+
+idx_users_email (email)
+  - Fast login lookups
+  - High-traffic: every authentication attempt
+  - UNIQUE constraint also creates index
+
+idx_users_subscription (subscription_tier, subscription_ends_at)
+  - Find active premium users
+  - Identify expiring subscriptions for notifications
+  - Used in subscription management queries
+
+FUTURE COLUMNS TO CONSIDER:
+- external_auth_id (TEXT): OAuth provider ID
+- stripe_customer_id (TEXT): Payment processing
+- notification_preferences (JSONB): Email/push settings
+- dietary_restrictions (TEXT[]): Filter restaurants
+- preferred_distance_miles (INTEGER): Default search radius
+- onboarding_completed (BOOLEAN): Track signup flow completion
+
+--------------------------------------------------------------------------------
+3.6 TABLE: user_queries
+--------------------------------------------------------------------------------
+
+PURPOSE:
+Logs every search query made by users. This is critical for:
+- Improving recommendations (machine learning training data)
+- Understanding user behavior and query patterns
+- Debugging poor results
+- Measuring conversion (query → selection)
+- Building user taste profiles
+
+COLUMNS:
+
+id (UUID, PRIMARY KEY)
+  - Unique identifier for each query
+  - One record per search
+
+user_id (UUID, FOREIGN KEY to users)
+  - Who made this query
+  - Nullable: anonymous users can search
+  - ON DELETE SET NULL: Keep query data even if user deleted
+  - Used for personalization and retention analysis
+
+query_text (TEXT, NOT NULL)
+  - The original user input
+  - Example: "cozy romantic Italian date spot, not too expensive"
+  - Required: This is the core data point
+  - Used for query understanding improvement
+
+parsed_features (JSONB)
+  - Backend's interpretation of query_text
+  - Output from LLM query parsing
+  - Example:
+    {
+      "features": {
+        "romantic": {"weight": 1.0, "target": 0.8},
+        "cozy": {"weight": 0.9, "target": 0.8}
+      },
+      "intent": "date_night",
+      "confidence": 0.95
+    }
+  - Used to improve query parsing over time
+  - Compare parsed vs user selection to validate accuracy
+
+filters_applied (JSONB)
+  - What hard filters were used
+  - Example:
+    {
+      "maxPrice": 3,
+      "cuisines": ["Italian"],
+      "radiusMiles": 10,
+      "minRating": 3.5
+    }
+  - Separates structured filters from semantic features
+  - Used for filter usage analytics
+
+search_latitude (DECIMAL(10,8))
+search_longitude (DECIMAL(11,8))
+search_radius_miles (DECIMAL(5,2))
+  - Where user was searching from
+  - Radius applied to search
+  - Used for location-based analytics
+  - Example: Urban vs suburban search patterns
+
+results_returned (JSONB)
+  - Which restaurants were shown to user
+  - Example: [{"id": "uuid", "score": 0.95, "position": 1}, ...]
+  - Ordered array: position matters
+  - Used for result quality analysis
+  - Compare shown vs selected to measure ranking quality
+
+selected_restaurant_id (UUID, FOREIGN KEY to restaurants)
+  - Which restaurant user ultimately chose (if any)
+  - Nullable: User might not select anything
+  - ON DELETE SET NULL: Keep data even if restaurant removed
+  - Critical for measuring conversion
+
+selection_position (INTEGER)
+  - Position in results list (1-10)
+  - Used to measure: Do users pick top results?
+  - Low position = good ranking, High = poor ranking
+  - NULL if no selection made
+
+time_to_selection (INTEGER)
+  - Seconds from query to selection
+  - Measure user confidence in results
+  - Fast selection = confident match
+  - Slow selection = uncertain, browsing multiple
+  - NULL if no selection made
+
+user_rating (INTEGER, CHECK BETWEEN 1 AND 5)
+  - Optional feedback on recommendation quality
+  - Prompt: "How was this recommendation?"
+  - Sparse data: Most users won't rate
+  - Valuable signal when provided
+
+user_feedback (TEXT)
+  - Optional text feedback
+  - Example: "Great suggestion!" or "Too expensive"
+  - Qualitative data for improvement
+  - Used to identify systematic issues
+
+created_at (TIMESTAMP, DEFAULT NOW())
+  - When query was made
+  - Used for temporal analysis
+  - Time-of-day, day-of-week patterns
+
+DESIGN DECISIONS:
+
+1. Why log every query?
+   - Training data: Build ML models from user behavior
+   - Analytics: Understand what users want
+   - Debugging: Why did user not find good match?
+   - Product metrics: Conversion rate, time to selection
+   - Personalization: Build user taste profiles
+
+2. What defines "success"?
+   - Primary: selected_restaurant_id IS NOT NULL
+   - Secondary: user_rating >= 4
+   - Tertiary: Fast selection (time_to_selection < 30 seconds)
+   - Measure conversion rate: selections / total queries
+
+3. Privacy considerations:
+   - Store query_text: Contains user intent (not PII)
+   - Store location: City-level analysis, not tracking
+   - Anonymize old queries: After 90 days, clear user_id
+   - Allow users to view/delete their query history
+
+4. JSONB structure for results_returned:
+   [
+     {
+       "restaurant_id": "uuid",
+       "name": "Four Charles",
+       "score": 0.95,
+       "position": 1,
+       "distance_miles": 4.2
+     },
+     ...
+   ]
+   - Stores snapshot: Results shown at query time
+   - Enables: "Why was this shown?" debugging
+   - Historical: Restaurant may change features later
+
+5. Learning from queries:
+   - Successful patterns: High-conversion queries
+   - Failed patterns: No selection or low rating
+   - Feature importance: Which features correlate with selection?
+   - Query evolution: How do users refine queries?
+
+ANALYTICS QUERIES:
+
+Top features in successful queries:
+  SELECT 
+    jsonb_object_keys(parsed_features->'features') as feature,
+    COUNT(*) 
+  FROM user_queries 
+  WHERE selected_restaurant_id IS NOT NULL
+  GROUP BY feature
+  ORDER BY count DESC;
+
+Conversion rate by time of day:
+  SELECT 
+    EXTRACT(HOUR FROM created_at) as hour,
+    COUNT(*) as total_queries,
+    COUNT(selected_restaurant_id) as selections,
+    ROUND(COUNT(selected_restaurant_id)::decimal / COUNT(*) * 100, 2) as conversion_rate
+  FROM user_queries
+  GROUP BY hour
+  ORDER BY hour;
+
+INDEXES:
+
+idx_queries_user (user_id)
+  - Fast lookup: User's query history
+  - Used in profile building
+  - Personalization: "Based on past searches..."
+
+idx_queries_created (created_at DESC)
+  - Recent queries for monitoring
+  - Temporal analysis
+  - DESC: Most recent first
+
+idx_queries_selected (selected_restaurant_id) WHERE selected_restaurant_id IS NOT NULL
+  - Partial index: Only successful queries
+  - Conversion analysis
+  - Restaurant popularity tracking
+
+--------------------------------------------------------------------------------
+3.7 TABLE: saved_restaurants
+--------------------------------------------------------------------------------
+
+PURPOSE:
+Users' personal collections of restaurants. Enables "save for later", favorites,
+wish lists, and visited tracking. Critical for retention and user engagement.
+
+COLUMNS:
+
+id (UUID, PRIMARY KEY)
+  - Unique identifier for each saved item
+  - Many-to-many relationship: users <-> restaurants
+
+user_id (UUID, NOT NULL, FOREIGN KEY to users)
+  - Who saved this restaurant
+  - ON DELETE CASCADE: Remove saves if user deleted
+  - Indexed: Fast "get all saved for user"
+
+restaurant_id (UUID, NOT NULL, FOREIGN KEY to restaurants)
+  - Which restaurant was saved
+  - ON DELETE CASCADE: Remove saves if restaurant deleted
+  - Indexed: "How many users saved this?"
+
+notes (TEXT)
+  - User's personal notes about restaurant
+  - Example: "Great for anniversary dinners", "Try the pasta"
+  - Optional: Most users won't add notes
+  - Private: Only visible to user
+
+tags (TEXT[])
+  - User-defined categories
+  - Example: ['date_night', 'try_soon', 'favorite', 'lunch_spot']
+  - Enables user organization and filtering
+  - Consider suggesting common tags
+
+personal_rating (INTEGER, CHECK BETWEEN 1 AND 5)
+  - User's own rating after visiting
+  - Different from Google rating
+  - Optional: NULL if not visited yet
+  - Used for personalization
+
+saved_at (TIMESTAMP, DEFAULT NOW())
+  - When restaurant was saved
+  - Sort by: Recent saves first
+  - Used for "recently saved" feature
+
+visited (BOOLEAN, DEFAULT false)
+  - Has user been there yet?
+  - Enables "to visit" vs "visited" lists
+  - Simple flag: true = visited, false = want to visit
+
+visited_at (TIMESTAMP)
+  - When user visited (if they tracked it)
+  - Nullable: Most users won't track this
+  - Useful for: "Places you visited this year"
+
+DESIGN DECISIONS:
+
+1. Why separate table (not just user favorites JSONB)?
+   - Queryable: Can find "most saved restaurants"
+   - Relational: Proper foreign keys and cascading
+   - Scalable: Users can save hundreds of restaurants
+   - Structured: Tags, notes, ratings as proper columns
+
+2. UNIQUE constraint (user_id, restaurant_id):
+   - Can't save same restaurant twice
+   - Update existing save if user tries to re-save
+   - Frontend: Show "saved" state consistently
+
+3. Why track visited separately from rating?
+   - User might visit but not rate
+   - User might save for future without visiting
+   - States: Saved → Visited → Rated
+   - Not all users track visits
+
+4. Feature ideas using this data:
+   - "Restaurants you haven't visited yet" (visited = false)
+   - "Your top-rated spots" (ORDER BY personal_rating DESC)
+   - "Popular among your network" (COUNT saves by friends)
+   - "Similar to places you loved" (restaurants with similar features)
+
+5. Privacy and social features:
+   - Default: Private saves
+   - Optional: Share saved lists with friends
+   - Future: "See what Sarah saved"
+   - Consider: public_visible BOOLEAN column
+
+INDEXES:
+
+idx_saved_user (user_id)
+  - Primary use case: "Get my saved restaurants"
+  - High traffic: Every time user views their saves
+  - Fast lookups: Usually <100 saves per user
+
+idx_saved_restaurant (restaurant_id)
+  - Analytics: "How many users saved this?"
+  - Social proof: "324 people saved this"
+  - Lower traffic than user index
+
+UNIQUE CONSTRAINT:
+UNIQUE(user_id, restaurant_id)
+  - Enforced at database level
+  - Prevents duplicate saves
+  - Frontend: Check if saved before showing save button
+
+FUTURE ENHANCEMENTS:
+- Collections: Group saves into lists (date nights, lunch spots)
+- Sharing: Share lists with friends
+- Collaborative: Friends can contribute to shared lists
+- Reminders: "You saved this 3 months ago, want to go?"
+
+--------------------------------------------------------------------------------
+3.8 TABLE: processing_queue
+--------------------------------------------------------------------------------
+
+PURPOSE:
+Manages background jobs for data pipeline. Tracks what needs to be done,
+what's being processed, and what failed. Enables reliable, scalable data
+processing without blocking user requests.
+
+COLUMNS:
+
+id (UUID, PRIMARY KEY)
+  - Unique identifier for each task
+  - One task per restaurant per task_type
+
+restaurant_id (UUID, NOT NULL, FOREIGN KEY to restaurants)
+  - Which restaurant this task is for
+  - ON DELETE CASCADE: Remove tasks if restaurant deleted
+  - All tasks are restaurant-specific in this system
+
+task_type (TEXT, NOT NULL)
+  - What operation to perform
+  - Values:
+    * 'scrape_reviews': Fetch new reviews from Google/Yelp
+    * 'extract_features': Process reviews with LLM
+    * 'aggregate_features': Compute restaurant_features from extractions
+    * 'update_metadata': Refresh restaurant info from API
+  - Consider ENUM type or CHECK constraint
+  - Extensible: Add new task types as needed
+
+priority (INTEGER, DEFAULT 0)
+  - Task urgency (higher = more urgent)
+  - Example priorities:
+    * 100: New restaurant (user just searched for it)
+    * 50: Stale data (reviews >6 months old)
+    * 10: Routine refresh
+    * 0: Low priority backfill
+  - Used in ORDER BY: Process high priority first
+
+status (TEXT, DEFAULT 'pending')
+  - Current task state
+  - Values:
+    * 'pending': Waiting to be processed
+    * 'processing': Currently being worked on
+    * 'completed': Successfully finished
+    * 'failed': Error occurred
+  - Consider ENUM type or CHECK constraint
+  - Transitions: pending → processing → completed/failed
+
+attempts (INTEGER, DEFAULT 0)
+  - How many times we've tried this task
+  - Increment on each attempt
+  - Used with max_attempts to prevent infinite retries
+  - Reset to 0 if task completes successfully
+
+max_attempts (INTEGER, DEFAULT 3)
+  - Maximum retry attempts before giving up
+  - Different tasks may have different limits
+  - After max_attempts, mark as 'failed' and alert
+  - Consider exponential backoff between retries
+
+last_error (TEXT)
+  - Error message from most recent failure
+  - NULL if no errors yet
+  - Used for debugging and monitoring
+  - Example: "Google API rate limit exceeded"
+
+created_at (TIMESTAMP, DEFAULT NOW())
+  - When task was added to queue
+  - Used to detect old pending tasks
+  - Alert: Tasks pending >24 hours
+
+started_at (TIMESTAMP)
+  - When processing began
+  - NULL until status = 'processing'
+  - Used to detect stuck tasks
+  - Alert: Processing >1 hour without completion
+
+completed_at (TIMESTAMP)
+  - When task finished (success or failure)
+  - NULL until terminal state reached
+  - Used for processing time metrics
+
+DESIGN DECISIONS:
+
+1. Why this table exists:
+   - Decouple: User requests don't wait for scraping/processing
+   - Reliability: Track failures and enable retries
+   - Scalability: Multiple workers can process queue
+   - Visibility: Monitor processing backlog
+   - Idempotency: Ensure tasks aren't duplicated
+
+2. Partial unique constraint:
+   CREATE UNIQUE INDEX idx_queue_unique_active_task 
+     ON processing_queue (restaurant_id, task_type) 
+     WHERE status IN ('pending', 'processing');
+   
+   Prevents duplicate active tasks but allows historical records
+   Example: Can't have two 'pending' scrape_reviews for same restaurant
+
+3. Task lifecycle:
+   1. Create: INSERT with status='pending'
+   2. Claim: Worker UPDATEs status='processing', started_at=NOW()
+   3. Process: Worker does the actual work
+   4. Complete: UPDATE status='completed', completed_at=NOW()
+      OR failed: UPDATE status='failed', attempts++, last_error='...'
+   5. Retry: If failed and attempts < max_attempts, reset to 'pending'
+
+4. Worker pattern (pseudocode):
+   ```
+   LOOP:
+     task = SELECT * FROM processing_queue
+            WHERE status = 'pending'
+            ORDER BY priority DESC, created_at
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED;
+     
+     UPDATE processing_queue
+     SET status = 'processing', started_at = NOW()
+     WHERE id = task.id;
+     
+     TRY:
+       processTask(task);
+       UPDATE status = 'completed', completed_at = NOW();
+     CATCH error:
+       UPDATE status = 'failed', attempts++, last_error = error;
+   ```
+
+5. Monitoring and alerts:
+   - Old pending: created_at > 24 hours ago, still pending
+   - Stuck processing: started_at > 1 hour ago, still processing
+   - High failure rate: >50% of tasks failing
+   - Backlog size: >1000 pending tasks
+
+6. Task types explained:
+
+   scrape_reviews:
+   - Fetch new reviews from Google Places API
+   - Frequency: Weekly for popular restaurants, monthly for others
+   - Trigger: New restaurant added or last_scraped_at > 7 days
+   - Creates: Multiple review records
+
+   extract_features:
+   - Send review text to LLM for feature extraction
+   - Frequency: Once per new review
+   - Trigger: New review added with is_processed = false
+   - Creates: feature_extractions record
+   - Most expensive: LLM API calls
+
+   aggregate_features:
+   - Compute restaurant_features from feature_extractions
+   - Frequency: After new extractions complete
+   - Trigger: New feature_extractions added
+   - Updates: restaurant_features row
+
+   update_metadata:
+   - Refresh restaurant info (rating, photos, hours)
+   - Frequency: Monthly
+   - Trigger: Scheduled job
+   - Updates: restaurants row
+
+INDEXES:
+
+idx_queue_pending (priority DESC, created_at) WHERE status = 'pending'
+  - Critical: Worker's query for next task
+  - Partial index: Only pending tasks (small, fast)
+  - Priority order: High priority first, then FIFO
+  - WHERE clause enables index-only scan
+
+idx_queue_failed (task_type, attempts) WHERE status = 'failed'
+  - Monitoring: Which task types fail most?
+  - Retry logic: Find failed tasks with attempts < max_attempts
+  - Alert: Tasks that hit max_attempts
+
+UNIQUE INDEX:
+idx_queue_unique_active_task (restaurant_id, task_type)
+  WHERE status IN ('pending', 'processing')
+  - Prevents duplicate active tasks
+  - Allows historical records (completed/failed)
+  - Partial index: Only active statuses
+
+QUEUE MANAGEMENT QUERIES:
+
+Get next task for worker:
+  SELECT * FROM processing_queue
+  WHERE status = 'pending'
+  ORDER BY priority DESC, created_at
+  LIMIT 1
+  FOR UPDATE SKIP LOCKED;
+
+Find stuck tasks:
+  SELECT * FROM processing_queue
+  WHERE status = 'processing'
+    AND started_at < NOW() - INTERVAL '1 hour';
+
+Retry failed tasks:
+  UPDATE processing_queue
+  SET status = 'pending', attempts = attempts + 1
+  WHERE status = 'failed'
+    AND attempts < max_attempts;
+
+================================================================================
+4. RELATIONSHIPS & DATA FLOW
+================================================================================
+
+PRIMARY RELATIONSHIPS:
+
+restaurants (1) ←→ (1) restaurant_features
+  - One-to-one relationship
+  - Every restaurant should have features (eventually)
+  - Features computed from reviews
+
+restaurants (1) ←→ (many) reviews
+  - One restaurant has many reviews
+  - Reviews scraped from external sources
+  - Source of truth for feature extraction
+
+reviews (1) ←→ (1+) feature_extractions
+  - One review can have multiple extractions (different models/prompts)
+  - Usually one extraction per review in practice
+  - Extractions feed into restaurant_features
+
+restaurants (1) ←→ (many) feature_extractions
+  - Denormalized: One restaurant has many extractions
+  - Derived from: restaurant ← reviews ← extractions
+  - Performance optimization for aggregation
+
+users (1) ←→ (many) user_queries
+  - One user makes many queries
+  - Nullable: Anonymous users can query
+  - Used for personalization and analytics
+
+users (1) ←→ (many) saved_restaurants ←→ (many) restaurants
+  - Many-to-many relationship through junction table
+  - Users save multiple restaurants
+  - Restaurants saved by multiple users
+
+restaurants (1) ←→ (0-1) processing_queue
+  - Restaurants may have pending tasks
+  - UNIQUE constraint on active tasks
+  - Historical tasks retained
+
+DATA FLOW PIPELINE:
+
+1. RESTAURANT ONBOARDING:
+   New Restaurant
+   ↓
+   restaurants table (INSERT)
+   ↓
+   processing_queue (task: scrape_reviews)
+   ↓
+   Worker fetches reviews
+   ↓
+   reviews table (INSERT multiple)
+   ↓
+   processing_queue (task: extract_features per review)
+   ↓
+   Worker sends reviews to LLM
+   ↓
+   feature_extractions table (INSERT multiple)
+   ↓
+   processing_queue (task: aggregate_features)
+   ↓
+   Worker computes aggregates
+   ↓
+   restaurant_features table (INSERT/UPDATE)
+   ↓
+   Restaurant ready for queries!
+
+2. USER QUERY FLOW:
+   User enters query
+   ↓
+   Backend parses with LLM
+   ↓
+   SQL: Filter restaurants (price, distance, cuisine)
+   ↓
+   SQL: Fetch restaurant_features for filtered results
+   ↓
+   Backend: Score each restaurant against query
+   ↓
+   Backend: Sort by score, return top 10
+   ↓
+   user_queries table (INSERT with results)
+   ↓
+   User selects restaurant
+   ↓
+   Update user_queries.selected_restaurant_id
+   ↓
+   (Optionally) saved_restaurants (INSERT)
+
+3. PERIODIC MAINTENANCE:
+   Nightly job:
+   - Find restaurants with last_scraped_at > 7 days
+   - Add scrape_reviews tasks to processing_queue
+   - Workers process queue → new reviews → re-extract → re-aggregate
+   
+   Weekly job:
+   - Analyze user_queries for successful patterns
+   - Update users.taste_profile based on selections
+   - Identify low-quality restaurants (low confidence_score)
+
+================================================================================
+5. INDEXING STRATEGY
+================================================================================
+
+PRINCIPLE: Index what you filter, join, and sort on frequently.
+
+GEOSPATIAL INDEXES (High Priority):
+  idx_restaurants_location (GIST on ll_to_earth(latitude, longitude))
+  - Enables: "Restaurants within 10 miles"
+  - Query pattern: WHERE earth_distance(...) <= radius
+  - Performance: O(log n) instead of O(n) full table scan
+
+PRIMARY KEY INDEXES (Automatic):
+  - All PRIMARY KEY constraints create implicit B-tree indexes
+  - Used for: Lookups by id, JOIN operations
+  - No action needed: Created automatically
+
+FOREIGN KEY INDEXES (Manual, High Priority):
+  idx_reviews_restaurant (restaurant_id)
+  idx_extractions_restaurant (restaurant_id)
+  idx_saved_user (user_id)
+  - Enables: Fast JOINs and "get all X for Y" queries
+  - Note: PostgreSQL doesn't auto-index FKs (unlike MySQL)
+  - Performance: Critical for relationship traversal
+
+FILTER INDEXES (Medium Priority):
+  idx_restaurants_price_rating (price_level, google_rating)
+  idx_restaurants_cuisine (GIN on cuisine_tags)
+  - Enables: Fast filtering on common criteria
+  - Composite indexes: Order matters (most selective first)
+
+PARTIAL INDEXES (High Value, Low Cost):
+  idx_restaurants_active (is_active) WHERE is_active = true
+  idx_reviews_unprocessed (is_processed) WHERE is_processed = false
+  idx_queue_pending (priority DESC, created_at) WHERE status = 'pending'
+  - Only indexes subset of data
+  - Smaller size = faster queries + less maintenance
+  - Perfect for: Boolean flags, status fields
+
+UNIQUE INDEXES (Constraints):
+  UNIQUE(google_place_id)
+  UNIQUE(source, source_review_id)
+  UNIQUE(user_id, restaurant_id) in saved_restaurants
+  - Enforces data integrity
+  - Also serves as B-tree index for lookups
+  - Double duty: Constraint + performance
+
+INDEXES TO CONSIDER (Based on Query Patterns):
+  - idx_features_romantic WHERE romantic > 0.5
+  - idx_restaurants_city if filtering by city frequently
+  - idx_queries_created for time-series analysis
+  - GIN on feature_extractions.features for JSONB queries
+
+INDEX MAINTENANCE:
+  - REINDEX periodically (monthly) to rebuild and defragment
+  - Monitor: pg_stat_user_indexes for unused indexes
+  - Remove: Indexes that are never used (bloat)
+  - Update statistics: ANALYZE after bulk imports
+
+ANTI-PATTERNS TO AVOID:
+  ✗ Indexing every column (index bloat, slower writes)
+  ✗ Indexing low-cardinality columns (e.g., boolean without WHERE)
+  ✗ Redundant indexes (idx on column + idx on (column, other))
+  ✗ Forgetting to index foreign keys
+
+================================================================================
+6. USAGE PATTERNS & QUERIES
+================================================================================
+
+COMMON QUERY 1: Search for Restaurants (Primary Use Case)
+
+Backend fetches filtered restaurants with their features:
+
+```sql
+SELECT 
+  r.id,
+  r.name,
+  r.latitude,
+  r.longitude,
+  r.price_level,
+  r.google_rating,
+  r.cuisine_tags,
+  r.photo_urls,
+  f.romantic,
+  f.cozy,
+  f.good_for_dates,
+  f.noise_level,
+  f.casual,
+  -- ... include all relevant features
+  f.confidence_score,
+  earth_distance(
+    ll_to_earth(r.latitude, r.longitude),
+    ll_to_earth($userLat, $userLng)
+  ) / 1609.34 as distance_miles
+FROM restaurants r
+INNER JOIN restaurant_features f ON f.restaurant_id = r.id
+WHERE 
+  r.is_active = true
+  AND r.price_level <= $maxPrice
+  AND r.cuisine_tags && $cuisines::text[]  -- Array overlap
+  AND earth_distance(
+    ll_to_earth(r.latitude, r.longitude),
+    ll_to_earth($userLat, $userLng)
+  ) <= ($radiusMiles * 1609.34)  -- Convert miles to meters
+  AND r.google_rating >= 3.5
+  AND f.confidence_score >= 0.5  -- Only high-quality data
+LIMIT 100;  -- Fetch more than needed, score in backend
+```
+
+Backend then scores these 100 restaurants and returns top 10.
+
+COMMON QUERY 2: Get Restaurant Details
+
+```sql
+SELECT 
+  r.*,
+  f.*,
+  ARRAY_AGG(rev.text ORDER BY rev.published_at DESC) FILTER (WHERE rev.rating >= 4) as top_reviews
+FROM restaurants r
+LEFT JOIN restaurant_features f ON f.restaurant_id = r.id
+LEFT JOIN reviews rev ON rev.restaurant_id = r.id
+WHERE r.id = $restaurantId
+GROUP BY r.id, f.id;
+```
+
+COMMON QUERY 3: Get User's Saved Restaurants
+
+```sql
+SELECT 
+  r.*,
+  f.*,
+  s.notes,
+  s.tags,
+  s.personal_rating,
+  s.visited,
+  s.saved_at
+FROM saved_restaurants s
+INNER JOIN restaurants r ON r.id = s.restaurant_id
+LEFT JOIN restaurant_features f ON f.restaurant_id = r.id
+WHERE s.user_id = $userId
+ORDER BY s.saved_at DESC;
+```
+
+COMMON QUERY 4: Process Next Queue Task (Worker)
+
+```sql
+-- Claim next task atomically
+BEGIN;
+  SELECT * FROM processing_queue
+  WHERE status = 'pending'
+  ORDER BY priority DESC, created_at
+  LIMIT 1
+  FOR UPDATE SKIP LOCKED;
+  
+  UPDATE processing_queue
+  SET status = 'processing', started_at = NOW()
+  WHERE id = $taskId;
+COMMIT;
+
+-- After processing...
+UPDATE processing_queue
+SET status = 'completed', completed_at = NOW()
+WHERE id = $taskId;
+```
+
+COMMON QUERY 5: Aggregate Features (Worker)
+
+```sql
+-- Get all extractions for restaurant, weighted by recency and confidence
+WITH weighted_extractions AS (
+  SELECT 
+    fe.features,
+    fe.extraction_confidence,
+    CASE 
+      WHEN fe.extracted_at > NOW() - INTERVAL '3 months' THEN 1.0
+      WHEN fe.extracted_at > NOW() - INTERVAL '6 months' THEN 0.7
+      WHEN fe.extracted_at > NOW() - INTERVAL '1 year' THEN 0.4
+      ELSE 0.2
+    END as recency_weight
+  FROM feature_extractions fe
+  WHERE fe.restaurant_id = $restaurantId
+)
+SELECT
+  -- For each feature, compute weighted average
+  -- This is pseudocode; actual implementation in backend
+  AVG((features->>'romantic')::decimal * recency_weight * extraction_confidence) as romantic,
+  AVG((features->>'cozy')::decimal * recency_weight * extraction_confidence) as cozy,
+  -- ... repeat for all 32 features
+  COUNT(*) as review_count_analyzed
+FROM weighted_extractions;
+```
+
+ANALYTICS QUERY 1: Most Popular Restaurants
+
+```sql
+SELECT 
+  r.name,
+  COUNT(DISTINCT s.user_id) as save_count,
+  COUNT(DISTINCT uq.id) as selection_count,
+  r.google_rating
+FROM restaurants r
+LEFT JOIN saved_restaurants s ON s.restaurant_id = r.id
+LEFT JOIN user_queries uq ON uq.selected_restaurant_id = r.id
+WHERE r.is_active = true
+GROUP BY r.id
+ORDER BY save_count DESC, selection_count DESC
+LIMIT 20;
+```
+
+ANALYTICS QUERY 2: Query Success Rate
+
+```sql
+SELECT 
+  DATE_TRUNC('day', created_at) as date,
+  COUNT(*) as total_queries,
+  COUNT(selected_restaurant_id) as successful_queries,
+  ROUND(COUNT(selected_restaurant_id)::decimal / COUNT(*) * 100, 2) as success_rate,
+  AVG(time_to_selection) FILTER (WHERE selected_restaurant_id IS NOT NULL) as avg_time_to_selection
+FROM user_queries
+WHERE created_at > NOW() - INTERVAL '30 days'
+GROUP BY DATE_TRUNC('day', created_at)
+ORDER BY date DESC;
+```
+
+MAINTENANCE QUERY: Find Stale Data
+
+```sql
+-- Restaurants needing review refresh
+SELECT id, name, last_scraped_at
+FROM restaurants
+WHERE last_scraped_at < NOW() - INTERVAL '30 days'
+  OR last_scraped_at IS NULL
+ORDER BY last_scraped_at NULLS FIRST
+LIMIT 100;
+
+-- Reviews needing feature extraction
+SELECT COUNT(*) as unprocessed_reviews
+FROM reviews
+WHERE is_processed = false;
+
+-- Restaurants with low confidence scores
+SELECT r.name, f.confidence_score, f.review_count_analyzed
+FROM restaurants r
+INNER JOIN restaurant_features f ON f.restaurant_id = r.id
+WHERE f.confidence_score < 0.5
+ORDER BY f.confidence_score;
+```
+
+================================================================================
+7. DATA PIPELINE OVERVIEW
+================================================================================
+
+PHASE 1: INITIAL DATA LOAD
+  1. Seed restaurants from Google Places API (by city/area)
+  2. For each restaurant:
+     - INSERT into restaurants table
+     - CREATE scrape_reviews task
+  3. Workers process queue:
+     - Fetch reviews from Google Places
+     - INSERT into reviews table
+     - CREATE extract_features task per review
+  4. Workers extract features:
+     - Send review to LLM
+     - Parse response
+     - INSERT into feature_extractions
+     - CREATE aggregate_features task
+  5. Workers aggregate:
+     - Compute weighted averages
+     - UPSERT into restaurant_features
+
+PHASE 2: ONGOING UPDATES
+  1. Scheduled job (daily):
+     - Identify stale restaurants (last_scraped_at > 7 days)
+     - CREATE scrape_reviews tasks
+  2. Real-time triggers:
+     - New restaurant searched → immediate scrape
+     - User reports closed → mark is_active = false
+  3. Quality monitoring:
+     - Flag restaurants with confidence_score < 0.5
+     - Re-extract with improved prompts
+     - Update model_version after improvements
+
+PHASE 3: USER INTERACTIONS
+  1. User searches:
+     - Parse query with LLM
+     - Filter + fetch from database
+     - Score in backend
+     - INSERT into user_queries
+  2. User selects:
+     - UPDATE user_queries.selected_restaurant_id
+     - Increment restaurant popularity
+  3. User saves:
+     - INSERT into saved_restaurants
+  4. Periodic profiling:
+     - Analyze user's query history
+     - Update users.taste_profile
+
+BATCH PROCESSING STRATEGY:
+  - Extract features: Batch 10 reviews at a time (shared context)
+  - Aggregate features: Batch 100 restaurants per job
+  - Queue processing: Multiple workers in parallel
+  - Rate limiting: Respect Google API limits (100 requests/second)
+
+ERROR HANDLING:
+  - LLM failures: Retry with exponential backoff
+  - API rate limits: Pause and resume
+  - Invalid data: Log, skip, alert
+  - Stuck tasks: Monitoring alerts, manual intervention
+
+================================================================================
+8. PERFORMANCE CONSIDERATIONS
+================================================================================
+
+QUERY PERFORMANCE:
+  - Primary bottleneck: Geospatial distance calculation
+  - Optimization: Filter on price/cuisine BEFORE distance calculation
+  - Index usage: EXPLAIN ANALYZE all common queries
+  - Target: <100ms for restaurant filtering, <2s end-to-end
+
+WRITE PERFORMANCE:
+  - Bulk inserts: Use COPY for initial data load
+  - Batch extractions: Process 100 reviews at a time
+  - Async processing: Don't block user requests
+  - Connection pooling: Limit concurrent database connections
+
+SCALING CONSIDERATIONS:
+  Database size at scale:
+  - 10,000 restaurants × 50 reviews = 500,000 reviews
+  - 500,000 reviews × 500 bytes = 250 MB (reviews)
+  - 500,000 extractions × 500 bytes = 250 MB (extractions)
+  - Total: ~500 MB data + ~200 MB indexes = ~700 MB
+  - Easily fits in memory on modest hardware
+
+  Query optimization at scale:
+  - Restaurants: 10k rows, GIST index ~10 MB, fast
+  - Features: 10k rows, B-tree indexes ~5 MB, instant
+  - Reviews: 500k rows, needs partitioning by restaurant_id if > 1M
+  - Queries: Grows indefinitely, consider archiving old queries
+
+CACHING STRATEGY:
+  - Restaurant + features: Redis cache (1 hour TTL)
+  - Query results: Cache by (query_text + filters) hash
+  - User taste profiles: Cache in memory (session)
+  - Invalidation: Clear cache when features updated
+
+MONITORING METRICS:
+  - Query latency: p50, p95, p99
+  - Database connections: Active vs idle
+  - Index hit rate: Should be >99%
+  - Queue depth: Pending tasks count
+  - Processing lag: Oldest pending task age
+  - API costs: OpenAI spend per day
+
+================================================================================
+9. FUTURE EXTENSIBILITY
+================================================================================
+
+POTENTIAL ADDITIONS:
+
+1. USER SOCIAL FEATURES:
+   - friends table: User connections
+   - shared_lists table: Collaborative collections
+   - activity_feed table: Friend's saves and visits
+
+2. RESTAURANT ENHANCEMENTS:
+   - menu_items table: Structured menu data
+   - photos table: User-uploaded photos
+   - check_ins table: Visit tracking
+   - reservations table: Booking integration
+
+3. ADVANCED FEATURES:
+   - embeddings: Add vector column for hybrid matching
+   - ml_models table: Track A/B testing of algorithms
+   - feedback_corrections table: User corrections to features
+   - seasonal_features table: Time-varying attributes
+
+4. ADMIN / RESTAURANT OWNER:
+   - restaurant_owners table: Claim listings
+   - feature_overrides table: Manual feature adjustments
+   - promotions table: Featured listings
+   - analytics_views table: Owner dashboards
+
+5. INTERNATIONALIZATION:
+   - Add country, timezone columns to restaurants
+   - Localized feature names (romantic → 로맨틱)
+   - Multi-currency support for price_level
+   - Language-specific review processing
+
+MIGRATION STRATEGY:
+  - Use migration tools: Flyway, Liquibase, or Prisma Migrate
+  - Version migrations: V001__initial.sql, V002__add_embeddings.sql
+  - Test migrations: Staging environment first
+  - Rollback plan: Always have down migrations
+  - Zero-downtime: Add columns (nullable), populate, make non-nullable
+
+DATA RETENTION POLICY:
+  - Reviews: Keep all (source of truth)
+  - Feature extractions: Keep for 1 year, then compress
+  - User queries: Anonymize after 90 days (GDPR)
+  - Processing queue: Archive completed tasks monthly
+  - Saved restaurants: Keep indefinitely (user data)
+
+BACKUP STRATEGY:
+  - Daily full backups: Encrypted, off-site
+  - Point-in-time recovery: WAL archiving
+  - Test restores: Monthly disaster recovery drill
+  - Critical tables: restaurants, users, saved_restaurants
+
+================================================================================
+END OF DATABASE DOCUMENTATION
+================================================================================
+
+This database schema provides a solid foundation for the Scarf restaurant
+recommendation app. It balances:
+- Performance: Optimized indexes for common queries
+- Flexibility: JSONB for evolving data structures
+- Reliability: Foreign keys, constraints, and queue processing
+- Scalability: Designed to handle 10,000+ restaurants efficiently
+- Maintainability: Clear structure, well-documented design decisions
+
+For questions or clarifications, refer to specific table sections above.

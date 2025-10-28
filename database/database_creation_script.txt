@@ -1,0 +1,293 @@
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "cube";
+CREATE EXTENSION IF NOT EXISTS "earthdistance";
+
+CREATE TABLE restaurants (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  
+  -- Identity
+  name TEXT NOT NULL,
+  google_place_id TEXT UNIQUE,
+  
+  -- Location
+  latitude DECIMAL(10, 8) NOT NULL,
+  longitude DECIMAL(11, 8) NOT NULL,
+  address TEXT,
+  city TEXT,
+  state TEXT,
+  zip_code TEXT,
+  
+  -- Basic metadata
+  price_level INTEGER CHECK (price_level BETWEEN 1 AND 4),
+  google_rating DECIMAL(2, 1),
+  google_review_count INTEGER,
+  cuisine_tags TEXT[],
+  phone TEXT,
+  website TEXT,
+  photo_urls TEXT[],
+  
+  -- Hours (store as JSON for flexibility)
+  hours JSONB,
+  
+  -- Status
+  is_active BOOLEAN DEFAULT true,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  last_scraped_at TIMESTAMP
+);
+
+-- Essential indexes for filtering
+CREATE INDEX idx_restaurants_location ON restaurants 
+  USING GIST (ll_to_earth(latitude, longitude));
+  
+CREATE INDEX idx_restaurants_price_rating 
+  ON restaurants (price_level, google_rating);
+  
+CREATE INDEX idx_restaurants_cuisine 
+  ON restaurants USING GIN (cuisine_tags);
+  
+CREATE INDEX idx_restaurants_active 
+  ON restaurants (is_active) WHERE is_active = true;
+
+CREATE TABLE restaurant_features (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  restaurant_id UUID NOT NULL UNIQUE REFERENCES restaurants(id) ON DELETE CASCADE,
+  
+  -- Atmosphere (6 features)
+  romantic DECIMAL(3, 2) CHECK (romantic BETWEEN 0 AND 1),
+  cozy DECIMAL(3, 2) CHECK (cozy BETWEEN 0 AND 1),
+  casual DECIMAL(3, 2) CHECK (casual BETWEEN 0 AND 1),
+  noise_level DECIMAL(3, 2) CHECK (noise_level BETWEEN 0 AND 1),
+  energy_level DECIMAL(3, 2) CHECK (energy_level BETWEEN 0 AND 1),
+  crowdedness DECIMAL(3, 2) CHECK (crowdedness BETWEEN 0 AND 1),
+  
+  -- Occasion (5 features)
+  good_for_dates DECIMAL(3, 2) CHECK (good_for_dates BETWEEN 0 AND 1),
+  good_for_groups DECIMAL(3, 2) CHECK (good_for_groups BETWEEN 0 AND 1),
+  family_friendly DECIMAL(3, 2) CHECK (family_friendly BETWEEN 0 AND 1),
+  business_appropriate DECIMAL(3, 2) CHECK (business_appropriate BETWEEN 0 AND 1),
+  celebration_worthy DECIMAL(3, 2) CHECK (celebration_worthy BETWEEN 0 AND 1),
+  
+  -- Service (2 features)
+  fast_service DECIMAL(3, 2) CHECK (fast_service BETWEEN 0 AND 1),
+  attentive_service DECIMAL(3, 2) CHECK (attentive_service BETWEEN 0 AND 1),
+  
+  -- Food (7 features)
+  authentic DECIMAL(3, 2) CHECK (authentic BETWEEN 0 AND 1),
+  creative_menu DECIMAL(3, 2) CHECK (creative_menu BETWEEN 0 AND 1),
+  comfort_food DECIMAL(3, 2) CHECK (comfort_food BETWEEN 0 AND 1),
+  healthy_options DECIMAL(3, 2) CHECK (healthy_options BETWEEN 0 AND 1),
+  portions_large DECIMAL(3, 2) CHECK (portions_large BETWEEN 0 AND 1),
+  vegan_friendly DECIMAL(3, 2) CHECK (vegan_friendly BETWEEN 0 AND 1),
+  photogenic_food DECIMAL(3, 2) CHECK (photogenic_food BETWEEN 0 AND 1),
+  
+  -- Ambiance (4 features)
+  decor_quality DECIMAL(3, 2) CHECK (decor_quality BETWEEN 0 AND 1),
+  photo_friendly_lighting DECIMAL(3, 2) CHECK (photo_friendly_lighting BETWEEN 0 AND 1),
+  nice_views DECIMAL(3, 2) CHECK (nice_views BETWEEN 0 AND 1),
+  trendy DECIMAL(3, 2) CHECK (trendy BETWEEN 0 AND 1),
+  
+  -- Practical (4 features)
+  outdoor_seating DECIMAL(3, 2) CHECK (outdoor_seating BETWEEN 0 AND 1),
+  easy_parking DECIMAL(3, 2) CHECK (easy_parking BETWEEN 0 AND 1),
+  reservations_needed DECIMAL(3, 2) CHECK (reservations_needed BETWEEN 0 AND 1),
+  late_night DECIMAL(3, 2) CHECK (late_night BETWEEN 0 AND 1),
+  
+  -- Value (4 features)
+  formality DECIMAL(3, 2) CHECK (formality BETWEEN 0 AND 1),
+  good_value DECIMAL(3, 2) CHECK (good_value BETWEEN 0 AND 1),
+  splurge_worthy DECIMAL(3, 2) CHECK (splurge_worthy BETWEEN 0 AND 1),
+  popularity DECIMAL(3, 2) CHECK (popularity BETWEEN 0 AND 1),
+  
+  -- Quality metadata
+  confidence_score DECIMAL(3, 2), -- How confident in these scores (0-1)
+  review_count_analyzed INTEGER, -- Number of reviews that went into this
+  last_updated_at TIMESTAMP DEFAULT NOW(),
+  model_version TEXT -- Track which LLM version generated these
+);
+
+CREATE INDEX idx_features_restaurant ON restaurant_features (restaurant_id);
+
+-- Optional: Indexes for high-value features (if you want to pre-filter in SQL)
+CREATE INDEX idx_features_romantic ON restaurant_features (romantic) 
+  WHERE romantic IS NOT NULL AND romantic > 0.5;
+CREATE INDEX idx_features_date ON restaurant_features (good_for_dates) 
+  WHERE good_for_dates IS NOT NULL AND good_for_dates > 0.5;
+
+  CREATE TABLE reviews (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  restaurant_id UUID NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+  
+  -- Review content
+  author_name TEXT,
+  text TEXT NOT NULL,
+  rating INTEGER CHECK (rating BETWEEN 1 AND 5),
+  
+  -- Source info
+  source TEXT NOT NULL, -- 'google', 'yelp', etc.
+  source_review_id TEXT NOT NULL,
+  review_url TEXT,
+  
+  -- Dates
+  published_at TIMESTAMP,
+  scraped_at TIMESTAMP DEFAULT NOW(),
+  
+  -- Processing status
+  is_processed BOOLEAN DEFAULT false,
+  processed_at TIMESTAMP,
+  
+  UNIQUE(source, source_review_id)
+);
+
+CREATE INDEX idx_reviews_restaurant ON reviews (restaurant_id);
+CREATE INDEX idx_reviews_unprocessed ON reviews (is_processed) 
+  WHERE is_processed = false;
+CREATE INDEX idx_reviews_published ON reviews (published_at DESC);
+
+CREATE TABLE feature_extractions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  review_id UUID NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+  restaurant_id UUID NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+  
+  -- Store as JSONB for flexibility
+  features JSONB NOT NULL,
+  -- Example: {"romantic": 0.9, "noise_level": 0.3, "good_for_dates": 0.85}
+  
+  -- Metadata
+  extraction_confidence DECIMAL(3, 2), -- LLM's confidence in extraction
+  model_used TEXT,
+  prompt_version TEXT,
+  extracted_at TIMESTAMP DEFAULT NOW(),
+  
+  -- Cost tracking
+  tokens_used INTEGER,
+  cost_usd DECIMAL(10, 6)
+);
+
+CREATE INDEX idx_extractions_review ON feature_extractions (review_id);
+CREATE INDEX idx_extractions_restaurant ON feature_extractions (restaurant_id);
+CREATE INDEX idx_extractions_date ON feature_extractions (extracted_at DESC);
+
+CREATE TABLE users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  
+  -- Auth
+  email TEXT UNIQUE NOT NULL,
+  password_hash TEXT, -- or use external auth provider
+  email_verified BOOLEAN DEFAULT false,
+  
+  -- Profile
+  name TEXT,
+  
+  -- Default location (for convenience)
+  default_latitude DECIMAL(10, 8),
+  default_longitude DECIMAL(11, 8),
+  default_city TEXT,
+  
+  -- Learned preferences (populated over time by backend)
+  taste_profile JSONB, -- Aggregated feature preferences from past queries
+  favorite_cuisines TEXT[],
+  
+  -- Subscription
+  subscription_tier TEXT DEFAULT 'free', -- 'free' or 'premium'
+  subscription_starts_at TIMESTAMP,
+  subscription_ends_at TIMESTAMP,
+  
+  -- Activity tracking
+  created_at TIMESTAMP DEFAULT NOW(),
+  last_active_at TIMESTAMP,
+  query_count INTEGER DEFAULT 0
+);
+
+CREATE INDEX idx_users_email ON users (email);
+CREATE INDEX idx_users_subscription ON users (subscription_tier, subscription_ends_at);
+
+CREATE TABLE user_queries (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  
+  -- Original query
+  query_text TEXT NOT NULL,
+  
+  -- Parsed by backend (store for analysis)
+  parsed_features JSONB, -- What features the backend extracted
+  filters_applied JSONB, -- What filters were used
+  
+  -- Location context
+  search_latitude DECIMAL(10, 8),
+  search_longitude DECIMAL(11, 8),
+  search_radius_miles DECIMAL(5, 2),
+  
+  -- Results (store for learning)
+  results_returned JSONB, -- Array of {restaurant_id, score}
+  selected_restaurant_id UUID REFERENCES restaurants(id) ON DELETE SET NULL,
+  selection_position INTEGER, -- Which result did they pick? (1-10)
+  time_to_selection INTEGER, -- Seconds until they picked
+  
+  -- Feedback
+  user_rating INTEGER CHECK (user_rating BETWEEN 1 AND 5),
+  user_feedback TEXT,
+  
+  -- Metadata
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_queries_user ON user_queries (user_id);
+CREATE INDEX idx_queries_created ON user_queries (created_at DESC);
+CREATE INDEX idx_queries_selected ON user_queries (selected_restaurant_id) 
+  WHERE selected_restaurant_id IS NOT NULL;
+
+CREATE TABLE saved_restaurants (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  restaurant_id UUID NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+  
+  -- User notes
+  notes TEXT,
+  tags TEXT[], -- ['date_night', 'try_soon', 'favorite']
+  personal_rating INTEGER CHECK (personal_rating BETWEEN 1 AND 5),
+  
+  -- Visit tracking
+  saved_at TIMESTAMP DEFAULT NOW(),
+  visited BOOLEAN DEFAULT false,
+  visited_at TIMESTAMP,
+  
+  UNIQUE(user_id, restaurant_id)
+);
+
+CREATE INDEX idx_saved_user ON saved_restaurants (user_id);
+CREATE INDEX idx_saved_restaurant ON saved_restaurants (restaurant_id);
+
+CREATE TABLE processing_queue (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  restaurant_id UUID NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+  
+  -- Task details
+  task_type TEXT NOT NULL, -- 'scrape_reviews', 'extract_features', 'aggregate_features'
+  priority INTEGER DEFAULT 0, -- Higher = more urgent
+  
+  -- Status
+  status TEXT DEFAULT 'pending', -- 'pending', 'processing', 'completed', 'failed'
+  attempts INTEGER DEFAULT 0,
+  max_attempts INTEGER DEFAULT 3,
+  last_error TEXT,
+  
+  -- Timestamps
+  created_at TIMESTAMP DEFAULT NOW(),
+  started_at TIMESTAMP,
+  completed_at TIMESTAMP
+);
+
+-- Create the partial unique constraint as a separate index
+CREATE UNIQUE INDEX idx_queue_unique_active_task 
+  ON processing_queue (restaurant_id, task_type) 
+  WHERE status IN ('pending', 'processing');
+
+-- Other indexes
+CREATE INDEX idx_queue_pending 
+  ON processing_queue (priority DESC, created_at) 
+  WHERE status = 'pending';
+
+CREATE INDEX idx_queue_failed 
+  ON processing_queue (task_type, attempts) 
+  WHERE status = 'failed';
