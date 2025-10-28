@@ -1,0 +1,2006 @@
+================================================================================
+SCARF BACKEND - TECHNICAL IMPLEMENTATION PLAN
+================================================================================
+
+Project: Natural Language Restaurant Recommendation System - Backend
+Version: 1.0
+Last Updated: 2025-10-27
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+1. Technology Stack & Architecture
+2. Project Structure
+3. Database Layer & ORM Setup
+4. Core API Endpoints
+5. LLM Integration (Query Parsing & Feature Extraction)
+6. Restaurant Matching & Scoring Algorithm
+7. Background Workers & Queue Processing
+8. Authentication & Authorization
+9. Error Handling & Validation
+10. Testing Strategy
+11. Deployment & DevOps
+12. Phase-by-Phase Implementation Plan
+13. Code Examples & Patterns
+
+================================================================================
+1. TECHNOLOGY STACK & ARCHITECTURE
+================================================================================
+
+CORE STACK DECISION:
+
+Runtime: Node.js 20+ with TypeScript
+  Why: Strong ecosystem, async/await for I/O, excellent DB libraries
+  Alternative considered: Python (rejected: weaker type safety, slower for API)
+
+Framework: Hono
+  Why: Extremely fast, edge-ready, modern API, middleware system
+  Alternative: Express (slower), Fastify (less modern)
+  Installation: npm install hono
+
+Database: PostgreSQL 15+ with pgvector
+  Why: See database documentation
+  Client: node-postgres (pg)
+  ORM: Drizzle ORM
+    Why: Type-safe, SQL-first, fast, great DX
+    Alternative: Prisma (slower), TypeORM (complex)
+
+Type Safety: TypeScript 5+ with strict mode
+  Why: Catch errors at compile time, better DX, self-documenting
+  Config: strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes
+
+Validation: Zod
+  Why: Type inference, runtime validation, great errors
+  Usage: API request/response validation
+
+LLM Provider: OpenAI API
+  Models:
+  - gpt-4o-mini: Query parsing, feature extraction ($0.15/1M input tokens)
+  - gpt-4o: Complex analysis if needed ($2.50/1M input tokens)
+  Library: openai npm package
+
+Environment Management: dotenv
+  Why: Simple, standard, works everywhere
+
+Process Manager: PM2 (production)
+  Why: Process clustering, auto-restart, monitoring
+
+ARCHITECTURE PATTERN:
+
+Layered Architecture:
+  ┌─────────────────────────────────────────┐
+  │  API Layer (Routes + Middleware)        │  ← Hono
+  ├─────────────────────────────────────────┤
+  │  Service Layer (Business Logic)         │  ← Core logic
+  ├─────────────────────────────────────────┤
+  │  Repository Layer (Data Access)         │  ← Drizzle ORM
+  ├─────────────────────────────────────────┤
+  │  Database (PostgreSQL)                  │
+  └─────────────────────────────────────────┘
+
+Key Principles:
+- Separation of concerns: Routes don't touch DB directly
+- Dependency injection: Services receive dependencies
+- Testability: Each layer can be unit tested
+- Type safety: End-to-end TypeScript
+
+================================================================================
+2. PROJECT STRUCTURE
+================================================================================
+
+restaurant-recommendation-backend/
+├── src/
+│   ├── config/
+│   │   ├── database.ts           # DB connection config
+│   │   ├── env.ts                # Environment variables (validated)
+│   │   └── openai.ts             # OpenAI client setup
+│   │
+│   ├── db/
+│   │   ├── schema.ts             # Drizzle schema definitions
+│   │   ├── migrations/           # SQL migration files
+│   │   └── seed.ts               # Seed data script
+│   │
+│   ├── routes/
+│   │   ├── index.ts              # Route aggregator
+│   │   ├── search.ts             # POST /api/search
+│   │   ├── restaurants.ts        # GET /api/restaurants/:id
+│   │   ├── users.ts              # User-related endpoints
+│   │   └── saved.ts              # Saved restaurants CRUD
+│   │
+│   ├── services/
+│   │   ├── search.service.ts     # Search orchestration
+│   │   ├── query-parser.service.ts    # LLM query parsing
+│   │   ├── scoring.service.ts    # Restaurant scoring logic
+│   │   ├── llm.service.ts        # OpenAI wrapper
+│   │   ├── feature-extraction.service.ts  # Review → features
+│   │   └── aggregation.service.ts     # Feature aggregation
+│   │
+│   ├── repositories/
+│   │   ├── restaurant.repository.ts
+│   │   ├── user.repository.ts
+│   │   ├── query.repository.ts
+│   │   └── review.repository.ts
+│   │
+│   ├── workers/
+│   │   ├── queue-processor.ts    # Main worker loop
+│   │   ├── review-scraper.ts     # Scrape reviews
+│   │   ├── feature-extractor.ts  # Extract features from reviews
+│   │   └── feature-aggregator.ts # Aggregate to restaurant_features
+│   │
+│   ├── types/
+│   │   ├── restaurant.types.ts
+│   │   ├── search.types.ts
+│   │   ├── feature.types.ts
+│   │   └── api.types.ts
+│   │
+│   ├── utils/
+│   │   ├── distance.ts           # Geospatial calculations
+│   │   ├── logger.ts             # Structured logging
+│   │   ├── errors.ts             # Custom error classes
+│   │   └── validators.ts         # Zod schemas
+│   │
+│   ├── middleware/
+│   │   ├── auth.ts               # Authentication middleware
+│   │   ├── error-handler.ts     # Global error handling
+│   │   ├── rate-limit.ts        # Rate limiting
+│   │   └── logging.ts           # Request logging
+│   │
+│   ├── app.ts                    # Hono app setup
+│   ├── server.ts                 # HTTP server entry
+│   └── worker.ts                 # Background worker entry
+│
+├── tests/
+│   ├── unit/
+│   ├── integration/
+│   └── e2e/
+│
+├── scripts/
+│   ├── migrate.ts
+│   ├── seed.ts
+│   └── generate-embeddings.ts
+│
+├── .env.example
+├── .env.local
+├── package.json
+├── tsconfig.json
+├── drizzle.config.ts
+└── README.md
+
+RATIONALE FOR STRUCTURE:
+
+1. Clear separation: routes → services → repositories → DB
+2. Testability: Mock at service layer for routes, mock at repo layer for services
+3. Reusability: Services used by both API and workers
+4. Type safety: Central types/ directory
+5. Scalability: Easy to split into microservices later
+
+================================================================================
+3. DATABASE LAYER & ORM SETUP
+================================================================================
+
+DRIZZLE ORM SETUP:
+
+Installation:
+npm install drizzle-orm pg
+npm install -D drizzle-kit @types/pg
+
+Configuration (drizzle.config.ts):
+```typescript
+import type { Config } from 'drizzle-kit';
+
+export default {
+  schema: './src/db/schema.ts',
+  out: './src/db/migrations',
+  driver: 'pg',
+  dbCredentials: {
+    connectionString: process.env.DATABASE_URL!,
+  },
+} satisfies Config;
+```
+
+SCHEMA DEFINITION (src/db/schema.ts):
+
+```typescript
+import { pgTable, uuid, text, decimal, integer, boolean, timestamp, jsonb, vector } from 'drizzle-orm/pg-core';
+import { relations } from 'drizzle-orm';
+
+// Restaurants table
+export const restaurants = pgTable('restaurants', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  name: text('name').notNull(),
+  googlePlaceId: text('google_place_id').unique(),
+  latitude: decimal('latitude', { precision: 10, scale: 8 }).notNull(),
+  longitude: decimal('longitude', { precision: 11, scale: 8 }).notNull(),
+  address: text('address'),
+  city: text('city'),
+  state: text('state'),
+  zipCode: text('zip_code'),
+  priceLevel: integer('price_level'),
+  googleRating: decimal('google_rating', { precision: 2, scale: 1 }),
+  googleReviewCount: integer('google_review_count'),
+  cuisineTags: text('cuisine_tags').array(),
+  phone: text('phone'),
+  website: text('website'),
+  photoUrls: text('photo_urls').array(),
+  hours: jsonb('hours'),
+  isActive: boolean('is_active').default(true).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  lastScrapedAt: timestamp('last_scraped_at'),
+});
+
+// Restaurant features table
+export const restaurantFeatures = pgTable('restaurant_features', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  restaurantId: uuid('restaurant_id').references(() => restaurants.id, { onDelete: 'cascade' }).notNull().unique(),
+  
+  // Atmosphere
+  romantic: decimal('romantic', { precision: 3, scale: 2 }),
+  cozy: decimal('cozy', { precision: 3, scale: 2 }),
+  casual: decimal('casual', { precision: 3, scale: 2 }),
+  noiseLevel: decimal('noise_level', { precision: 3, scale: 2 }),
+  energyLevel: decimal('energy_level', { precision: 3, scale: 2 }),
+  crowdedness: decimal('crowdedness', { precision: 3, scale: 2 }),
+  
+  // Occasion
+  goodForDates: decimal('good_for_dates', { precision: 3, scale: 2 }),
+  goodForGroups: decimal('good_for_groups', { precision: 3, scale: 2 }),
+  familyFriendly: decimal('family_friendly', { precision: 3, scale: 2 }),
+  businessAppropriate: decimal('business_appropriate', { precision: 3, scale: 2 }),
+  celebrationWorthy: decimal('celebration_worthy', { precision: 3, scale: 2 }),
+  
+  // Service
+  fastService: decimal('fast_service', { precision: 3, scale: 2 }),
+  attentiveService: decimal('attentive_service', { precision: 3, scale: 2 }),
+  
+  // Food
+  authentic: decimal('authentic', { precision: 3, scale: 2 }),
+  creativeMenu: decimal('creative_menu', { precision: 3, scale: 2 }),
+  comfortFood: decimal('comfort_food', { precision: 3, scale: 2 }),
+  healthyOptions: decimal('healthy_options', { precision: 3, scale: 2 }),
+  portionsLarge: decimal('portions_large', { precision: 3, scale: 2 }),
+  veganFriendly: decimal('vegan_friendly', { precision: 3, scale: 2 }),
+  photogenicFood: decimal('photogenic_food', { precision: 3, scale: 2 }),
+  
+  // Ambiance
+  decorQuality: decimal('decor_quality', { precision: 3, scale: 2 }),
+  photoFriendlyLighting: decimal('photo_friendly_lighting', { precision: 3, scale: 2 }),
+  niceViews: decimal('nice_views', { precision: 3, scale: 2 }),
+  trendy: decimal('trendy', { precision: 3, scale: 2 }),
+  
+  // Practical
+  outdoorSeating: decimal('outdoor_seating', { precision: 3, scale: 2 }),
+  easyParking: decimal('easy_parking', { precision: 3, scale: 2 }),
+  reservationsNeeded: decimal('reservations_needed', { precision: 3, scale: 2 }),
+  lateNight: decimal('late_night', { precision: 3, scale: 2 }),
+  
+  // Value
+  formality: decimal('formality', { precision: 3, scale: 2 }),
+  goodValue: decimal('good_value', { precision: 3, scale: 2 }),
+  splurgeWorthy: decimal('splurge_worthy', { precision: 3, scale: 2 }),
+  popularity: decimal('popularity', { precision: 3, scale: 2 }),
+  
+  // Metadata
+  confidenceScore: decimal('confidence_score', { precision: 3, scale: 2 }),
+  reviewCountAnalyzed: integer('review_count_analyzed'),
+  lastUpdatedAt: timestamp('last_updated_at').defaultNow().notNull(),
+  modelVersion: text('model_version'),
+});
+
+// Relations
+export const restaurantsRelations = relations(restaurants, ({ one, many }) => ({
+  features: one(restaurantFeatures, {
+    fields: [restaurants.id],
+    references: [restaurantFeatures.restaurantId],
+  }),
+  reviews: many(reviews),
+}));
+
+// ... Define other tables (users, reviews, user_queries, etc.)
+```
+
+DATABASE CONNECTION (src/config/database.ts):
+
+```typescript
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { Pool } from 'pg';
+import * as schema from '../db/schema';
+import { env } from './env';
+
+const pool = new Pool({
+  connectionString: env.DATABASE_URL,
+  max: 20, // Maximum pool size
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
+});
+
+export const db = drizzle(pool, { schema });
+
+export async function testConnection() {
+  try {
+    const result = await pool.query('SELECT NOW()');
+    console.log('✅ Database connected:', result.rows[0].now);
+  } catch (error) {
+    console.error('❌ Database connection failed:', error);
+    throw error;
+  }
+}
+```
+
+ENVIRONMENT VALIDATION (src/config/env.ts):
+
+```typescript
+import { z } from 'zod';
+
+const envSchema = z.object({
+  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  PORT: z.coerce.number().default(3000),
+  DATABASE_URL: z.string().url(),
+  OPENAI_API_KEY: z.string().min(1),
+  JWT_SECRET: z.string().min(32).optional(),
+  GOOGLE_PLACES_API_KEY: z.string().optional(),
+});
+
+export const env = envSchema.parse(process.env);
+
+export type Env = z.infer<typeof envSchema>;
+```
+
+================================================================================
+4. CORE API ENDPOINTS
+================================================================================
+
+API DESIGN PRINCIPLES:
+
+1. RESTful where sensible, pragmatic where not
+2. JSON request/response bodies
+3. Consistent error format
+4. Version prefix: /api/v1
+5. Authentication: Bearer token (JWT)
+
+ENDPOINT SPECIFICATION:
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ SEARCH ENDPOINTS                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+
+POST /api/v1/search
+  Description: Natural language restaurant search
+  Auth: Optional (better results when authenticated)
+  Rate limit: 10/hour (free), unlimited (premium)
+  
+  Request Body:
+  {
+    "query": "cozy romantic Italian date spot, not too expensive",
+    "latitude": 40.7589,
+    "longitude": -73.9851,
+    "radiusMiles": 10,
+    "maxPrice": 3,
+    "cuisines": ["Italian"], // optional override
+    "limit": 10
+  }
+  
+  Response:
+  {
+    "results": [
+      {
+        "id": "uuid",
+        "name": "Bella Notte",
+        "distance": 4.2,
+        "priceLevel": 3,
+        "cuisineTags": ["Italian", "Fine Dining"],
+        "photoUrl": "...",
+        "matchScore": 0.95,
+        "explanation": "Bella Notte matches your vibe perfectly...",
+        "matchedFeatures": {
+          "romantic": { "target": 0.8, "actual": 0.95, "match": 0.98 },
+          "cozy": { "target": 0.8, "actual": 0.85, "match": 0.94 }
+        }
+      }
+    ],
+    "queryUnderstood": {
+      "features": {
+        "romantic": { "weight": 1.0, "target": 0.8 },
+        "cozy": { "weight": 0.9, "target": 0.8 }
+      },
+      "intent": "date_night",
+      "confidence": 0.95
+    },
+    "meta": {
+      "totalResults": 47,
+      "queryId": "uuid",
+      "processingTimeMs": 342
+    }
+  }
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ RESTAURANT ENDPOINTS                                                 │
+└─────────────────────────────────────────────────────────────────────┘
+
+GET /api/v1/restaurants/:id
+  Description: Get detailed restaurant info
+  Auth: Optional
+  
+  Response:
+  {
+    "id": "uuid",
+    "name": "Bella Notte",
+    "address": "127 W 43rd St",
+    "coordinates": { "lat": 40.7589, "lng": -73.9851 },
+    "priceLevel": 3,
+    "rating": 4.6,
+    "cuisineTags": ["Italian", "Fine Dining"],
+    "phone": "(212) 555-0123",
+    "website": "...",
+    "photos": ["url1", "url2"],
+    "hours": { "monday": "17:00-22:00", ... },
+    "features": {
+      "romantic": 0.95,
+      "cozy": 0.85,
+      // ... all 32 features
+    },
+    "topReviews": [
+      { "author": "Jane D.", "text": "...", "rating": 5 }
+    ]
+  }
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ USER ENDPOINTS                                                       │
+└─────────────────────────────────────────────────────────────────────┘
+
+POST /api/v1/auth/register
+POST /api/v1/auth/login
+GET /api/v1/users/me
+PATCH /api/v1/users/me
+
+GET /api/v1/users/me/saved
+  Description: Get user's saved restaurants
+  Auth: Required
+  
+  Response:
+  {
+    "saved": [
+      {
+        "restaurant": { /* full restaurant object */ },
+        "notes": "Great for anniversaries",
+        "tags": ["date_night", "favorite"],
+        "savedAt": "2025-10-20T19:30:00Z",
+        "visited": false
+      }
+    ]
+  }
+
+POST /api/v1/users/me/saved
+  Description: Save a restaurant
+  Auth: Required
+  Request: { "restaurantId": "uuid", "notes": "...", "tags": [...] }
+
+DELETE /api/v1/users/me/saved/:restaurantId
+
+GET /api/v1/users/me/queries
+  Description: Get user's search history
+  Auth: Required
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ ADMIN ENDPOINTS (Future)                                             │
+└─────────────────────────────────────────────────────────────────────┘
+
+POST /api/v1/admin/restaurants
+PUT /api/v1/admin/restaurants/:id
+POST /api/v1/admin/restaurants/:id/trigger-scrape
+
+ROUTE IMPLEMENTATION (src/routes/search.ts):
+
+```typescript
+import { Hono } from 'hono';
+import { zValidator } from '@hono/zod-validator';
+import { z } from 'zod';
+import { SearchService } from '../services/search.service';
+import { auth } from '../middleware/auth';
+
+const searchRouter = new Hono();
+
+const searchSchema = z.object({
+  query: z.string().min(3).max(500),
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+  radiusMiles: z.number().min(1).max(50).default(10),
+  maxPrice: z.number().int().min(1).max(4).optional(),
+  cuisines: z.array(z.string()).optional(),
+  limit: z.number().int().min(1).max(20).default(10),
+});
+
+searchRouter.post(
+  '/',
+  zValidator('json', searchSchema),
+  async (c) => {
+    const startTime = Date.now();
+    const body = c.req.valid('json');
+    const user = c.get('user'); // From auth middleware (optional)
+    
+    const searchService = new SearchService();
+    const results = await searchService.search({
+      ...body,
+      userId: user?.id,
+    });
+    
+    const processingTime = Date.now() - startTime;
+    
+    return c.json({
+      results: results.restaurants,
+      queryUnderstood: results.parsedQuery,
+      meta: {
+        totalResults: results.totalCount,
+        queryId: results.queryId,
+        processingTimeMs: processingTime,
+      },
+    });
+  }
+);
+
+export default searchRouter;
+```
+
+APP SETUP (src/app.ts):
+
+```typescript
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { logger } from 'hono/logger';
+import { prettyJSON } from 'hono/pretty-json';
+import searchRouter from './routes/search';
+import restaurantRouter from './routes/restaurants';
+import userRouter from './routes/users';
+import { errorHandler } from './middleware/error-handler';
+import { rateLimiter } from './middleware/rate-limit';
+
+const app = new Hono();
+
+// Global middleware
+app.use('*', logger());
+app.use('*', cors());
+app.use('*', prettyJSON());
+app.use('/api/*', rateLimiter());
+
+// Health check
+app.get('/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOString() }));
+
+// API routes
+app.route('/api/v1/search', searchRouter);
+app.route('/api/v1/restaurants', restaurantRouter);
+app.route('/api/v1/users', userRouter);
+
+// Error handling (must be last)
+app.onError(errorHandler);
+
+export default app;
+```
+
+================================================================================
+5. LLM INTEGRATION (QUERY PARSING & FEATURE EXTRACTION)
+================================================================================
+
+OPENAI CLIENT SETUP (src/config/openai.ts):
+
+```typescript
+import OpenAI from 'openai';
+import { env } from './env';
+
+export const openai = new OpenAI({
+  apiKey: env.OPENAI_API_KEY,
+});
+
+export const MODELS = {
+  FAST: 'gpt-4o-mini',      // Query parsing, feature extraction
+  SMART: 'gpt-4o',          // Complex analysis (if needed)
+  EMBEDDING: 'text-embedding-3-small', // Future: embeddings
+} as const;
+```
+
+QUERY PARSER SERVICE (src/services/query-parser.service.ts):
+
+```typescript
+import { openai, MODELS } from '../config/openai';
+import { z } from 'zod';
+
+const FEATURE_NAMES = [
+  'romantic', 'cozy', 'casual', 'noise_level', 'energy_level', 'crowdedness',
+  'good_for_dates', 'good_for_groups', 'family_friendly', 'business_appropriate',
+  'celebration_worthy', 'fast_service', 'attentive_service', 'authentic',
+  'creative_menu', 'comfort_food', 'healthy_options', 'portions_large',
+  'vegan_friendly', 'photogenic_food', 'decor_quality', 'photo_friendly_lighting',
+  'nice_views', 'trendy', 'outdoor_seating', 'easy_parking', 'reservations_needed',
+  'late_night', 'formality', 'good_value', 'splurge_worthy', 'popularity'
+] as const;
+
+export interface ParsedFeature {
+  weight: number;  // 0-1: How important is this feature?
+  target: number;  // 0-1: What value do we want?
+  required?: boolean;
+}
+
+export interface ParsedQuery {
+  features: Record<string, ParsedFeature>;
+  intent: string;
+  confidence: number;
+  cuisines?: string[];
+  maxPrice?: number;
+  occasionType?: string;
+}
+
+const QUERY_PARSING_PROMPT = `You are a restaurant query parser. Extract feature preferences from the user's natural language query.
+
+Available features: ${FEATURE_NAMES.join(', ')}
+
+For each relevant feature mentioned or implied, return:
+- weight: 0.0-1.0 (how important is this feature?)
+- target: 0.0-1.0 (what value do we want? 0=low, 1=high)
+- required: boolean (must have this feature?)
+
+IMPORTANT GUIDELINES:
+- "quiet" or "not noisy" → noise_level: {weight: 0.8, target: 0.2}
+- "lively" or "energetic" → energy_level: {weight: 0.8, target: 0.9}
+- "romantic date" → romantic: {weight: 1.0, target: 0.9, required: true}, good_for_dates: {weight: 1.0, target: 0.9}
+- "casual" → casual: {weight: 0.9, target: 0.9}, formality: {weight: 0.7, target: 0.2}
+- "cheap" or "budget" → good_value: {weight: 1.0, target: 0.9}
+- Price mentions → extract maxPrice (1-4)
+- Cuisine mentions → extract cuisines array
+
+Return JSON only, no explanation:
+{
+  "features": {
+    "romantic": {"weight": 1.0, "target": 0.9, "required": true},
+    "cozy": {"weight": 0.8, "target": 0.8}
+  },
+  "intent": "date_night",
+  "confidence": 0.95,
+  "cuisines": ["Italian"],
+  "maxPrice": 3,
+  "occasionType": "romantic_dinner"
+}`;
+
+export class QueryParserService {
+  async parseQuery(queryText: string): Promise<ParsedQuery> {
+    try {
+      const response = await openai.chat.completions.create({
+        model: MODELS.FAST,
+        messages: [
+          { role: 'system', content: QUERY_PARSING_PROMPT },
+          { role: 'user', content: queryText }
+        ],
+        temperature: 0.3, // Low temperature for consistency
+        response_format: { type: 'json_object' },
+      });
+
+      const content = response.choices[0].message.content;
+      if (!content) throw new Error('No response from LLM');
+
+      const parsed = JSON.parse(content) as ParsedQuery;
+      
+      // Validate and normalize
+      this.validateParsedQuery(parsed);
+      
+      return parsed;
+    } catch (error) {
+      console.error('Query parsing failed:', error);
+      throw new Error('Failed to parse query');
+    }
+  }
+
+  private validateParsedQuery(parsed: ParsedQuery): void {
+    // Ensure weights and targets are in valid range
+    Object.entries(parsed.features).forEach(([feature, values]) => {
+      if (values.weight < 0 || values.weight > 1) {
+        throw new Error(`Invalid weight for ${feature}: ${values.weight}`);
+      }
+      if (values.target < 0 || values.target > 1) {
+        throw new Error(`Invalid target for ${feature}: ${values.target}`);
+      }
+    });
+
+    // Ensure confidence is valid
+    if (parsed.confidence < 0 || parsed.confidence > 1) {
+      parsed.confidence = 0.5; // Default if invalid
+    }
+  }
+
+  // Fallback: Simple keyword-based parsing (if LLM fails)
+  parseQueryFallback(queryText: string): ParsedQuery {
+    const lower = queryText.toLowerCase();
+    const features: Record<string, ParsedFeature> = {};
+
+    // Keyword detection
+    if (lower.includes('romantic') || lower.includes('date')) {
+      features.romantic = { weight: 1.0, target: 0.9 };
+      features.good_for_dates = { weight: 1.0, target: 0.9 };
+    }
+    if (lower.includes('cozy') || lower.includes('intimate')) {
+      features.cozy = { weight: 0.9, target: 0.9 };
+    }
+    if (lower.includes('quiet') || lower.includes('not loud')) {
+      features.noise_level = { weight: 0.8, target: 0.2 };
+    }
+    if (lower.includes('casual') || lower.includes('relaxed')) {
+      features.casual = { weight: 0.9, target: 0.9 };
+    }
+    if (lower.includes('family') || lower.includes('kids')) {
+      features.family_friendly = { weight: 1.0, target: 0.9 };
+    }
+
+    return {
+      features,
+      intent: 'general',
+      confidence: 0.5, // Lower confidence for fallback
+    };
+  }
+}
+```
+
+FEATURE EXTRACTION SERVICE (src/services/feature-extraction.service.ts):
+
+```typescript
+import { openai, MODELS } from '../config/openai';
+
+const FEATURE_EXTRACTION_PROMPT = `You are analyzing a restaurant review to extract feature scores.
+
+Review: "{reviewText}"
+Rating: {rating}/5
+
+Rate the following features from 0.0 to 1.0 based ONLY on what's mentioned:
+- If not mentioned, return null
+- 0.0 = strongly negative, 0.5 = neutral, 1.0 = strongly positive
+
+Features:
+${FEATURE_NAMES.map(f => `- ${f}`).join('\n')}
+
+IMPORTANT:
+- "quiet" → noise_level: 0.2 (low noise is good for quiet)
+- "loud" or "noisy" → noise_level: 0.9
+- "romantic" → romantic: 0.9, good_for_dates: 0.9
+- "casual" → casual: 0.9, formality: 0.2
+- Only extract features explicitly mentioned or strongly implied
+
+Return JSON with only mentioned features:
+{
+  "romantic": 0.9,
+  "noise_level": 0.3,
+  "good_for_dates": 0.85,
+  "confidence": 0.9
+}`;
+
+export interface ExtractedFeatures {
+  [feature: string]: number | null;
+  confidence: number;
+}
+
+export class FeatureExtractionService {
+  async extractFeatures(
+    reviewText: string,
+    rating: number
+  ): Promise<ExtractedFeatures> {
+    try {
+      const prompt = FEATURE_EXTRACTION_PROMPT
+        .replace('{reviewText}', reviewText)
+        .replace('{rating}', rating.toString());
+
+      const response = await openai.chat.completions.create({
+        model: MODELS.FAST,
+        messages: [
+          { role: 'system', content: prompt }
+        ],
+        temperature: 0.2,
+        response_format: { type: 'json_object' },
+      });
+
+      const content = response.choices[0].message.content;
+      if (!content) throw new Error('No response from LLM');
+
+      const extracted = JSON.parse(content) as ExtractedFeatures;
+      
+      return extracted;
+    } catch (error) {
+      console.error('Feature extraction failed:', error);
+      throw error;
+    }
+  }
+
+  // Batch extraction (more efficient)
+  async extractFeaturesBatch(
+    reviews: Array<{ text: string; rating: number }>
+  ): Promise<ExtractedFeatures[]> {
+    // Process in batches of 10 to avoid rate limits
+    const results: ExtractedFeatures[] = [];
+    
+    for (let i = 0; i < reviews.length; i += 10) {
+      const batch = reviews.slice(i, i + 10);
+      const promises = batch.map(r => this.extractFeatures(r.text, r.rating));
+      const batchResults = await Promise.all(promises);
+      results.push(...batchResults);
+      
+      // Rate limiting: Wait 1 second between batches
+      if (i + 10 < reviews.length) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+    
+    return results;
+  }
+}
+```
+
+================================================================================
+6. RESTAURANT MATCHING & SCORING ALGORITHM
+================================================================================
+
+SCORING SERVICE (src/services/scoring.service.ts):
+
+```typescript
+import { ParsedQuery, ParsedFeature } from './query-parser.service';
+
+export interface Restaurant {
+  id: string;
+  name: string;
+  latitude: string;
+  longitude: string;
+  priceLevel: number;
+  googleRating: string;
+  cuisineTags: string[];
+  features: Record<string, string | null>; // DECIMAL values as strings
+}
+
+export interface ScoredRestaurant extends Restaurant {
+  matchScore: number;
+  distanceMiles: number;
+  featureMatches: Record<string, FeatureMatch>;
+  explanation: string;
+}
+
+export interface FeatureMatch {
+  target: number;
+  actual: number;
+  match: number; // 0-1: How well does it match?
+}
+
+export class ScoringService {
+  scoreRestaurants(
+    restaurants: Restaurant[],
+    parsedQuery: ParsedQuery,
+    userLocation: { lat: number; lng: number },
+    radiusMiles: number
+  ): ScoredRestaurant[] {
+    return restaurants.map(restaurant => {
+      const distanceMiles = this.calculateDistance(
+        userLocation.lat,
+        userLocation.lng,
+        parseFloat(restaurant.latitude),
+        parseFloat(restaurant.longitude)
+      );
+
+      const { score, featureMatches } = this.calculateFeatureScore(
+        restaurant.features,
+        parsedQuery.features
+      );
+
+      const finalScore = this.calculateFinalScore(
+        score,
+        parseFloat(restaurant.googleRating),
+        distanceMiles,
+        radiusMiles
+      );
+
+      return {
+        ...restaurant,
+        matchScore: finalScore,
+        distanceMiles,
+        featureMatches,
+        explanation: this.generateExplanation(restaurant, featureMatches, parsedQuery),
+      };
+    }).sort((a, b) => b.matchScore - a.matchScore);
+  }
+
+  private calculateFeatureScore(
+    restaurantFeatures: Record<string, string | null>,
+    queryFeatures: Record<string, ParsedFeature>
+  ): { score: number; featureMatches: Record<string, FeatureMatch> } {
+    let weightedSum = 0;
+    let totalWeight = 0;
+    const featureMatches: Record<string, FeatureMatch> = {};
+
+    Object.entries(queryFeatures).forEach(([featureName, queryFeature]) => {
+      const actualValue = restaurantFeatures[featureName];
+      
+      // Skip if restaurant doesn't have this feature
+      if (actualValue === null || actualValue === undefined) {
+        return;
+      }
+
+      const actual = parseFloat(actualValue);
+      const target = queryFeature.target;
+      const weight = queryFeature.weight;
+
+      // Calculate match: 1 - normalized distance
+      // Perfect match = 1.0, complete mismatch = 0.0
+      const distance = Math.abs(target - actual);
+      const match = 1 - distance;
+
+      featureMatches[featureName] = {
+        target,
+        actual,
+        match,
+      };
+
+      // Required features get extra weight penalty if not met
+      if (queryFeature.required && match < 0.7) {
+        weightedSum += match * weight * 0.5; // Heavy penalty
+      } else {
+        weightedSum += match * weight;
+      }
+
+      totalWeight += weight;
+    });
+
+    const score = totalWeight > 0 ? weightedSum / totalWeight : 0;
+
+    return { score, featureMatches };
+  }
+
+  private calculateFinalScore(
+    featureScore: number,
+    googleRating: number,
+    distance: number,
+    maxDistance: number
+  ): number {
+    // Weighted combination of factors
+    const featureWeight = 0.70;  // 70% feature matching
+    const qualityWeight = 0.20;  // 20% overall quality (Google rating)
+    const proximityWeight = 0.10; // 10% proximity
+
+    const normalizedRating = googleRating / 5.0;
+    const proximityScore = 1 - Math.min(distance / maxDistance, 1);
+
+    const finalScore = 
+      featureScore * featureWeight +
+      normalizedRating * qualityWeight +
+      proximityScore * proximityWeight;
+
+    return Math.round(finalScore * 100) / 100; // Round to 2 decimals
+  }
+
+  private calculateDistance(
+    lat1: number,
+    lon1: number,
+    lat2: number,
+    lon2: number
+  ): number {
+    // Haversine formula
+    const R = 3959; // Earth radius in miles
+    const dLat = this.toRad(lat2 - lat1);
+    const dLon = this.toRad(lon2 - lon1);
+    
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(this.toRad(lat1)) *
+      Math.cos(this.toRad(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+    
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    const distance = R * c;
+    
+    return Math.round(distance * 10) / 10; // Round to 1 decimal
+  }
+
+  private toRad(degrees: number): number {
+    return degrees * (Math.PI / 180);
+  }
+
+  private generateExplanation(
+    restaurant: Restaurant,
+    featureMatches: Record<string, FeatureMatch>,
+    parsedQuery: ParsedQuery
+  ): string {
+    // Get top 3 matching features
+    const topMatches = Object.entries(featureMatches)
+      .sort((a, b) => b[1].match - a[1].match)
+      .slice(0, 3)
+      .filter(([_, match]) => match.match > 0.7);
+
+    if (topMatches.length === 0) {
+      return `${restaurant.name} is a good option in the area.`;
+    }
+
+    const featureNames = topMatches.map(([name]) => 
+      name.replace(/_/g, ' ')
+    );
+
+    const explanation = `${restaurant.name} matches your preferences with strong scores for ${featureNames.slice(0, -1).join(', ')}${featureNames.length > 1 ? ' and ' : ''}${featureNames[featureNames.length - 1]}.`;
+
+    return explanation;
+  }
+}
+```
+
+SEARCH SERVICE (src/services/search.service.ts):
+
+```typescript
+import { db } from '../config/database';
+import { restaurants, restaurantFeatures } from '../db/schema';
+import { eq, and, sql, lte, arrayOverlaps } from 'drizzle-orm';
+import { QueryParserService } from './query-parser.service';
+import { ScoringService } from './scoring.service';
+import { v4 as uuidv4 } from 'uuid';
+
+export interface SearchParams {
+  query: string;
+  latitude: number;
+  longitude: number;
+  radiusMiles: number;
+  maxPrice?: number;
+  cuisines?: string[];
+  limit: number;
+  userId?: string;
+}
+
+export class SearchService {
+  private queryParser = new QueryParserService();
+  private scoringService = new ScoringService();
+
+  async search(params: SearchParams) {
+    const queryId = uuidv4();
+    
+    // Step 1: Parse natural language query
+    const parsedQuery = await this.queryParser.parseQuery(params.query);
+
+    // Step 2: Build SQL filter conditions
+    const conditions = [
+      eq(restaurants.isActive, true),
+    ];
+
+    // Add price filter
+    if (params.maxPrice) {
+      conditions.push(lte(restaurants.priceLevel, params.maxPrice));
+    } else if (parsedQuery.maxPrice) {
+      conditions.push(lte(restaurants.priceLevel, parsedQuery.maxPrice));
+    }
+
+    // Add cuisine filter
+    const cuisineList = params.cuisines || parsedQuery.cuisines;
+    if (cuisineList && cuisineList.length > 0) {
+      conditions.push(arrayOverlaps(restaurants.cuisineTags, cuisineList));
+    }
+
+    // Add distance filter (using raw SQL for earthdistance)
+    conditions.push(
+      sql`earth_distance(
+        ll_to_earth(${restaurants.latitude}::float, ${restaurants.longitude}::float),
+        ll_to_earth(${params.latitude}, ${params.longitude})
+      ) <= ${params.radiusMiles * 1609.34}` // Convert miles to meters
+    );
+
+    // Minimum quality threshold
+    conditions.push(sql`${restaurants.googleRating}::float >= 3.5`);
+
+    // Step 3: Query database with joins
+    const results = await db
+      .select({
+        restaurant: restaurants,
+        features: restaurantFeatures,
+        distance: sql<number>`earth_distance(
+          ll_to_earth(${restaurants.latitude}::float, ${restaurants.longitude}::float),
+          ll_to_earth(${params.latitude}, ${params.longitude})
+        ) / 1609.34`.as('distance_miles'),
+      })
+      .from(restaurants)
+      .innerJoin(restaurantFeatures, eq(restaurants.id, restaurantFeatures.restaurantId))
+      .where(and(...conditions))
+      .limit(100); // Fetch more than needed for scoring
+
+    // Step 4: Score and rank results
+    const flatResults = results.map(r => ({
+      ...r.restaurant,
+      features: r.features,
+    }));
+
+    const scored = this.scoringService.scoreRestaurants(
+      flatResults,
+      parsedQuery,
+      { lat: params.latitude, lng: params.longitude },
+      params.radiusMiles
+    );
+
+    // Step 5: Take top N results
+    const topResults = scored.slice(0, params.limit);
+
+    // Step 6: Log query (async, don't await)
+    this.logQuery(queryId, params, parsedQuery, topResults, params.userId);
+
+    return {
+      queryId,
+      restaurants: topResults,
+      parsedQuery,
+      totalCount: results.length,
+    };
+  }
+
+  private async logQuery(
+    queryId: string,
+    params: SearchParams,
+    parsedQuery: any,
+    results: any[],
+    userId?: string
+  ) {
+    // Log to user_queries table for analytics
+    // Implementation depends on your user_queries table schema
+    // This runs async, doesn't block response
+  }
+}
+```
+
+================================================================================
+7. BACKGROUND WORKERS & QUEUE PROCESSING
+================================================================================
+
+QUEUE PROCESSOR (src/workers/queue-processor.ts):
+
+```typescript
+import { db } from '../config/database';
+import { processingQueue } from '../db/schema';
+import { eq, and, inArray } from 'drizzle-orm';
+import { ReviewScraperWorker } from './review-scraper';
+import { FeatureExtractorWorker } from './feature-extractor';
+import { FeatureAggregatorWorker } from './feature-aggregator';
+
+const WORKERS = {
+  scrape_reviews: ReviewScraperWorker,
+  extract_features: FeatureExtractorWorker,
+  aggregate_features: FeatureAggregatorWorker,
+};
+
+export class QueueProcessor {
+  private isRunning = false;
+
+  async start() {
+    this.isRunning = true;
+    console.log('🚀 Queue processor started');
+
+    while (this.isRunning) {
+      try {
+        await this.processNextTask();
+        await this.sleep(1000); // Wait 1 second between tasks
+      } catch (error) {
+        console.error('Error processing task:', error);
+        await this.sleep(5000); // Wait longer on error
+      }
+    }
+  }
+
+  stop() {
+    this.isRunning = false;
+    console.log('🛑 Queue processor stopped');
+  }
+
+  private async processNextTask() {
+    // Claim next task atomically
+    const task = await db.transaction(async (tx) => {
+      // Select next pending task
+      const [nextTask] = await tx
+        .select()
+        .from(processingQueue)
+        .where(eq(processingQueue.status, 'pending'))
+        .orderBy(processingQueue.priority, 'DESC')
+        .orderBy(processingQueue.createdAt, 'ASC')
+        .limit(1)
+        .for('update', { skipLocked: true });
+
+      if (!nextTask) return null;
+
+      // Mark as processing
+      await tx
+        .update(processingQueue)
+        .set({
+          status: 'processing',
+          startedAt: new Date(),
+        })
+        .where(eq(processingQueue.id, nextTask.id));
+
+      return nextTask;
+    });
+
+    if (!task) {
+      // No tasks available
+      return;
+    }
+
+    console.log(`Processing task: ${task.taskType} for restaurant ${task.restaurantId}`);
+
+    try {
+      // Get appropriate worker for task type
+      const WorkerClass = WORKERS[task.taskType as keyof typeof WORKERS];
+      if (!WorkerClass) {
+        throw new Error(`Unknown task type: ${task.taskType}`);
+      }
+
+      const worker = new WorkerClass();
+      await worker.execute(task.restaurantId);
+
+      // Mark as completed
+      await db
+        .update(processingQueue)
+        .set({
+          status: 'completed',
+          completedAt: new Date(),
+        })
+        .where(eq(processingQueue.id, task.id));
+
+      console.log(`✅ Task completed: ${task.taskType}`);
+    } catch (error) {
+      console.error(`❌ Task failed: ${task.taskType}`, error);
+
+      // Mark as failed
+      await db
+        .update(processingQueue)
+        .set({
+          status: 'failed',
+          attempts: task.attempts + 1,
+          lastError: error instanceof Error ? error.message : 'Unknown error',
+        })
+        .where(eq(processingQueue.id, task.id));
+
+      // Retry if under max attempts
+      if (task.attempts + 1 < task.maxAttempts) {
+        await db
+          .update(processingQueue)
+          .set({ status: 'pending' })
+          .where(eq(processingQueue.id, task.id));
+      }
+    }
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+}
+
+// Worker entry point
+if (require.main === module) {
+  const processor = new QueueProcessor();
+  
+  process.on('SIGTERM', () => processor.stop());
+  process.on('SIGINT', () => processor.stop());
+  
+  processor.start();
+}
+```
+
+FEATURE EXTRACTOR WORKER (src/workers/feature-extractor.ts):
+
+```typescript
+import { db } from '../config/database';
+import { reviews, featureExtractions } from '../db/schema';
+import { eq, and } from 'drizzle-orm';
+import { FeatureExtractionService } from '../services/feature-extraction.service';
+
+export class FeatureExtractorWorker {
+  private extractionService = new FeatureExtractionService();
+
+  async execute(restaurantId: string) {
+    // Get unprocessed reviews for this restaurant
+    const unprocessedReviews = await db
+      .select()
+      .from(reviews)
+      .where(
+        and(
+          eq(reviews.restaurantId, restaurantId),
+          eq(reviews.isProcessed, false)
+        )
+      )
+      .limit(50); // Process in batches
+
+    if (unprocessedReviews.length === 0) {
+      console.log('No unprocessed reviews found');
+      return;
+    }
+
+    console.log(`Processing ${unprocessedReviews.length} reviews`);
+
+    // Extract features from each review
+    for (const review of unprocessedReviews) {
+      try {
+        const extracted = await this.extractionService.extractFeatures(
+          review.text,
+          review.rating
+        );
+
+        // Store extraction
+        await db.insert(featureExtractions).values({
+          reviewId: review.id,
+          restaurantId: review.restaurantId,
+          features: extracted,
+          extractionConfidence: extracted.confidence,
+          modelUsed: 'gpt-4o-mini',
+          extractedAt: new Date(),
+        });
+
+        // Mark review as processed
+        await db
+          .update(reviews)
+          .set({
+            isProcessed: true,
+            processedAt: new Date(),
+          })
+          .where(eq(reviews.id, review.id));
+
+        console.log(`✅ Extracted features from review ${review.id}`);
+      } catch (error) {
+        console.error(`Failed to extract features from review ${review.id}:`, error);
+        // Continue with next review
+      }
+    }
+
+    // Queue aggregation task
+    await this.queueAggregation(restaurantId);
+  }
+
+  private async queueAggregation(restaurantId: string) {
+    await db.insert(processingQueue).values({
+      restaurantId,
+      taskType: 'aggregate_features',
+      priority: 50,
+      status: 'pending',
+    }).onConflictDoNothing();
+  }
+}
+```
+
+FEATURE AGGREGATOR WORKER (src/workers/feature-aggregator.ts):
+
+```typescript
+import { db } from '../config/database';
+import { featureExtractions, restaurantFeatures } from '../db/schema';
+import { eq, sql } from 'drizzle-orm';
+
+export class FeatureAggregatorWorker {
+  async execute(restaurantId: string) {
+    // Get all feature extractions for this restaurant
+    const extractions = await db
+      .select()
+      .from(featureExtractions)
+      .where(eq(featureExtractions.restaurantId, restaurantId));
+
+    if (extractions.length === 0) {
+      console.log('No extractions found for aggregation');
+      return;
+    }
+
+    console.log(`Aggregating ${extractions.length} feature extractions`);
+
+    // Aggregate features with recency weighting
+    const aggregated = this.aggregateFeatures(extractions);
+
+    // Upsert into restaurant_features
+    await db
+      .insert(restaurantFeatures)
+      .values({
+        restaurantId,
+        ...aggregated,
+        reviewCountAnalyzed: extractions.length,
+        lastUpdatedAt: new Date(),
+        modelVersion: 'gpt-4o-mini-v1',
+      })
+      .onConflictDoUpdate({
+        target: [restaurantFeatures.restaurantId],
+        set: {
+          ...aggregated,
+          reviewCountAnalyzed: extractions.length,
+          lastUpdatedAt: new Date(),
+        },
+      });
+
+    console.log('✅ Features aggregated successfully');
+  }
+
+  private aggregateFeatures(extractions: any[]) {
+    const featureNames = [
+      'romantic', 'cozy', 'casual', 'noiseLevel', 'energyLevel',
+      // ... all 32 features
+    ];
+
+    const aggregated: any = {};
+    const now = Date.now();
+
+    featureNames.forEach(featureName => {
+      const values: number[] = [];
+      const weights: number[] = [];
+
+      extractions.forEach(extraction => {
+        const featureValue = extraction.features[featureName];
+        if (featureValue !== null && featureValue !== undefined) {
+          // Recency weight: more recent = higher weight
+          const ageMonths = (now - new Date(extraction.extractedAt).getTime()) / (1000 * 60 * 60 * 24 * 30);
+          const recencyWeight = ageMonths < 3 ? 1.0 : ageMonths < 6 ? 0.7 : 0.4;
+          
+          // Confidence weight
+          const confidenceWeight = extraction.extractionConfidence || 0.8;
+          
+          const totalWeight = recencyWeight * confidenceWeight;
+          
+          values.push(featureValue);
+          weights.push(totalWeight);
+        }
+      });
+
+      if (values.length > 0) {
+        // Weighted average
+        const weightedSum = values.reduce((sum, val, i) => sum + val * weights[i], 0);
+        const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+        aggregated[featureName] = weightedSum / totalWeight;
+      } else {
+        aggregated[featureName] = null;
+      }
+    });
+
+    // Calculate confidence score based on sample size
+    aggregated.confidenceScore = this.calculateConfidence(extractions.length);
+
+    return aggregated;
+  }
+
+  private calculateConfidence(sampleSize: number): number {
+    if (sampleSize >= 50) return 0.95;
+    if (sampleSize >= 20) return 0.85;
+    if (sampleSize >= 10) return 0.70;
+    if (sampleSize >= 5) return 0.55;
+    return 0.40;
+  }
+}
+```
+
+================================================================================
+8. AUTHENTICATION & AUTHORIZATION
+================================================================================
+
+JWT-BASED AUTH (src/middleware/auth.ts):
+
+```typescript
+import { Context, Next } from 'hono';
+import { verify } from 'hono/jwt';
+import { env } from '../config/env';
+
+export interface UserPayload {
+  id: string;
+  email: string;
+  subscriptionTier: 'free' | 'premium';
+}
+
+export const auth = async (c: Context, next: Next) => {
+  const authHeader = c.req.header('Authorization');
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    // Optional auth: continue without user
+    return next();
+  }
+
+  const token = authHeader.substring(7);
+  
+  try {
+    const payload = await verify(token, env.JWT_SECRET!) as UserPayload;
+    c.set('user', payload);
+  } catch (error) {
+    return c.json({ error: 'Invalid token' }, 401);
+  }
+
+  return next();
+};
+
+export const requireAuth = async (c: Context, next: Next) => {
+  await auth(c, next);
+  
+  const user = c.get('user');
+  if (!user) {
+    return c.json({ error: 'Authentication required' }, 401);
+  }
+
+  return next();
+};
+```
+
+RATE LIMITING (src/middleware/rate-limit.ts):
+
+```typescript
+import { Context, Next } from 'hono';
+
+// Simple in-memory rate limiting (use Redis in production)
+const rateLimitStore = new Map<string, { count: number; resetAt: number }>();
+
+export const rateLimiter = (limits = { free: 10, premium: 1000 }) => {
+  return async (c: Context, next: Next) => {
+    const user = c.get('user');
+    const key = user?.id || c.req.header('x-forwarded-for') || 'anonymous';
+    
+    const now = Date.now();
+    const windowMs = 60 * 60 * 1000; // 1 hour
+    
+    let record = rateLimitStore.get(key);
+    
+    if (!record || now > record.resetAt) {
+      record = { count: 0, resetAt: now + windowMs };
+      rateLimitStore.set(key, record);
+    }
+    
+    record.count++;
+    
+    const limit = user?.subscriptionTier === 'premium' ? limits.premium : limits.free;
+    
+    if (record.count > limit) {
+      return c.json(
+        { error: 'Rate limit exceeded', retryAfter: Math.ceil((record.resetAt - now) / 1000) },
+        429
+      );
+    }
+    
+    c.header('X-RateLimit-Limit', limit.toString());
+    c.header('X-RateLimit-Remaining', (limit - record.count).toString());
+    c.header('X-RateLimit-Reset', new Date(record.resetAt).toISOString());
+    
+    return next();
+  };
+};
+```
+
+================================================================================
+9. ERROR HANDLING & VALIDATION
+================================================================================
+
+CUSTOM ERRORS (src/utils/errors.ts):
+
+```typescript
+export class AppError extends Error {
+  constructor(
+    public statusCode: number,
+    message: string,
+    public isOperational = true
+  ) {
+    super(message);
+    Object.setPrototypeOf(this, AppError.prototype);
+  }
+}
+
+export class ValidationError extends AppError {
+  constructor(message: string) {
+    super(400, message);
+  }
+}
+
+export class NotFoundError extends AppError {
+  constructor(message = 'Resource not found') {
+    super(404, message);
+  }
+}
+
+export class UnauthorizedError extends AppError {
+  constructor(message = 'Unauthorized') {
+    super(401, message);
+  }
+}
+```
+
+ERROR HANDLER (src/middleware/error-handler.ts):
+
+```typescript
+import { Context } from 'hono';
+import { AppError } from '../utils/errors';
+
+export const errorHandler = (err: Error, c: Context) => {
+  console.error('Error:', err);
+
+  if (err instanceof AppError) {
+    return c.json(
+      {
+        error: {
+          message: err.message,
+          statusCode: err.statusCode,
+        },
+      },
+      err.statusCode
+    );
+  }
+
+  // Unknown error
+  return c.json(
+    {
+      error: {
+        message: 'Internal server error',
+        statusCode: 500,
+      },
+    },
+    500
+  );
+};
+```
+
+================================================================================
+10. TESTING STRATEGY
+================================================================================
+
+TESTING STACK:
+
+- Unit tests: Vitest
+- Integration tests: Vitest + testcontainers
+- E2E tests: Playwright (later)
+
+EXAMPLE UNIT TEST (tests/unit/scoring.service.test.ts):
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { ScoringService } from '../../src/services/scoring.service';
+
+describe('ScoringService', () => {
+  const scoringService = new ScoringService();
+
+  describe('calculateFeatureScore', () => {
+    it('should give perfect score for exact match', () => {
+      const restaurant = {
+        features: {
+          romantic: '0.9',
+          cozy: '0.8',
+        },
+      };
+
+      const query = {
+        features: {
+          romantic: { weight: 1.0, target: 0.9 },
+          cozy: { weight: 1.0, target: 0.8 },
+        },
+      };
+
+      const result = scoringService.scoreRestaurants([restaurant], query, ...);
+      expect(result[0].matchScore).toBeGreaterThan(0.95);
+    });
+
+    it('should penalize mismatches', () => {
+      const restaurant = {
+        features: {
+          romantic: '0.2', // Low
+        },
+      };
+
+      const query = {
+        features: {
+          romantic: { weight: 1.0, target: 0.9, required: true }, // Want high
+        },
+      };
+
+      const result = scoringService.scoreRestaurants([restaurant], query, ...);
+      expect(result[0].matchScore).toBeLessThan(0.5);
+    });
+  });
+});
+```
+
+================================================================================
+11. DEPLOYMENT & DEVOPS
+================================================================================
+
+DEPLOYMENT OPTIONS:
+
+Option 1: Railway (Recommended for MVP)
+  - Deploy: Connect GitHub, auto-deploy on push
+  - Database: Postgres with pgvector included
+  - Cost: ~$20/month
+  - Setup: railway.json config file
+
+Option 2: Render
+  - Similar to Railway
+  - Free tier available (with limitations)
+  - Easy setup
+
+Option 3: AWS (Later, for scale)
+  - ECS/Fargate for containers
+  - RDS for Postgres
+  - More complex, more control
+
+DOCKER SETUP (Dockerfile):
+
+```dockerfile
+FROM node:20-alpine
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci --only=production
+
+COPY . .
+RUN npm run build
+
+EXPOSE 3000
+
+CMD ["node", "dist/server.js"]
+```
+
+DOCKER COMPOSE (docker-compose.yml):
+
+```yaml
+version: '3.8'
+
+services:
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://user:pass@db:5432/scarf
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - db
+
+  worker:
+    build: .
+    command: node dist/worker.js
+    environment:
+      - DATABASE_URL=postgresql://user:pass@db:5432/scarf
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - db
+
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=pass
+      - POSTGRES_DB=scarf
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+volumes:
+  postgres_data:
+```
+
+ENVIRONMENT VARIABLES (.env.example):
+
+```
+NODE_ENV=development
+PORT=3000
+DATABASE_URL=postgresql://user:pass@localhost:5432/scarf
+OPENAI_API_KEY=sk-...
+JWT_SECRET=your-secret-key-min-32-chars
+GOOGLE_PLACES_API_KEY=optional
+```
+
+================================================================================
+12. PHASE-BY-PHASE IMPLEMENTATION PLAN
+================================================================================
+
+PHASE 1: MVP CORE (Week 1-2)
+Goal: Basic search working with test data
+
+✅ Day 1-2: Setup & Database
+  - Initialize project (npm init, TypeScript, Hono)
+  - Setup Drizzle ORM with schema
+  - Create migrations
+  - Seed test data (20 restaurants)
+  - Test database connection
+
+✅ Day 3-4: Query Parsing & Scoring
+  - Implement QueryParserService with OpenAI
+  - Implement ScoringService (feature matching)
+  - Unit tests for scoring algorithm
+  - Test with various queries
+
+✅ Day 5-6: Search API
+  - Implement SearchService (orchestration)
+  - Create /api/search endpoint
+  - Add request validation (Zod)
+  - Test end-to-end search flow
+
+✅ Day 7: Restaurant Detail API
+  - Implement /api/restaurants/:id endpoint
+  - Add error handling
+  - Basic logging
+
+Deliverable: Working search API with 20 test restaurants
+
+PHASE 2: USER FEATURES (Week 3)
+Goal: User accounts and saved restaurants
+
+✅ Day 8-9: Authentication
+  - Implement JWT auth
+  - /api/auth/register and /api/auth/login
+  - Auth middleware
+  - User repository
+
+✅ Day 10-11: Saved Restaurants
+  - /api/users/me/saved (CRUD)
+  - User query history
+  - Test with authenticated requests
+
+✅ Day 12-13: Rate Limiting & Polish
+  - Implement rate limiting
+  - Add request logging
+  - Error handling improvements
+  - API documentation
+
+✅ Day 14: Testing & Bug Fixes
+  - Integration tests
+  - Fix issues found in testing
+  - Performance optimization
+
+Deliverable: Full user system with saved restaurants
+
+PHASE 3: REAL DATA PIPELINE (Week 4-5)
+Goal: Scrape and process real restaurant data
+
+✅ Day 15-17: Review Scraping
+  - Google Places API integration
+  - Review scraper worker
+  - Processing queue system
+  - Scrape 100 real restaurants
+
+✅ Day 18-20: Feature Extraction
+  - Feature extraction service with LLM
+  - Feature extractor worker
+  - Batch processing optimization
+  - Cost monitoring
+
+✅ Day 21-22: Feature Aggregation
+  - Aggregation algorithm
+  - Feature aggregator worker
+  - Update test: scrape → extract → aggregate
+
+✅ Day 23-24: Data Quality
+  - Confidence scoring
+  - Error handling for bad data
+  - Monitoring dashboard (basic)
+
+✅ Day 25: Scale Test
+  - Process 500 restaurants
+  - Monitor costs
+  - Performance tuning
+
+Deliverable: Automated pipeline processing real data
+
+PHASE 4: POLISH & DEPLOY (Week 6)
+Goal: Production-ready backend
+
+✅ Day 26-27: Production Prep
+  - Environment configuration
+  - Docker setup
+  - Database migrations for production
+  - Security audit
+
+✅ Day 28-29: Deployment
+  - Deploy to Railway/Render
+  - Setup monitoring
+  - Performance testing
+  - Cost optimization
+
+✅ Day 30: Documentation & Handoff
+  - API documentation
+  - Deployment guide
+  - Troubleshooting guide
+  - Mobile app integration guide
+
+Deliverable: Production backend with 1000+ restaurants
+
+================================================================================
+13. CODE EXAMPLES & PATTERNS
+================================================================================
+
+REPOSITORY PATTERN EXAMPLE (src/repositories/restaurant.repository.ts):
+
+```typescript
+import { db } from '../config/database';
+import { restaurants, restaurantFeatures } from '../db/schema';
+import { eq } from 'drizzle-orm';
+
+export class RestaurantRepository {
+  async findById(id: string) {
+    const [result] = await db
+      .select()
+      .from(restaurants)
+      .leftJoin(restaurantFeatures, eq(restaurants.id, restaurantFeatures.restaurantId))
+      .where(eq(restaurants.id, id));
+
+    if (!result) return null;
+
+    return {
+      ...result.restaurants,
+      features: result.restaurant_features,
+    };
+  }
+
+  async findByIds(ids: string[]) {
+    return db
+      .select()
+      .from(restaurants)
+      .where(inArray(restaurants.id, ids));
+  }
+
+  async create(data: InsertRestaurant) {
+    const [restaurant] = await db
+      .insert(restaurants)
+      .values(data)
+      .returning();
+
+    return restaurant;
+  }
+
+  async update(id: string, data: Partial<InsertRestaurant>) {
+    const [restaurant] = await db
+      .update(restaurants)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(restaurants.id, id))
+      .returning();
+
+    return restaurant;
+  }
+}
+```
+
+DEPENDENCY INJECTION PATTERN:
+
+```typescript
+// services/search.service.ts
+export class SearchService {
+  constructor(
+    private restaurantRepo: RestaurantRepository,
+    private queryParser: QueryParserService,
+    private scoring: ScoringService
+  ) {}
+
+  async search(params: SearchParams) {
+    // Use injected dependencies
+    const parsed = await this.queryParser.parseQuery(params.query);
+    const restaurants = await this.restaurantRepo.findInRadius(...);
+    const scored = this.scoring.scoreRestaurants(restaurants, parsed);
+    return scored;
+  }
+}
+
+// In route:
+const searchService = new SearchService(
+  new RestaurantRepository(),
+  new QueryParserService(),
+  new ScoringService()
+);
+```
+
+STRUCTURED LOGGING:
+
+```typescript
+// utils/logger.ts
+import pino from 'pino';
+
+export const logger = pino({
+  level: process.env.LOG_LEVEL || 'info',
+  transport: {
+    target: 'pino-pretty',
+    options: {
+      colorize: true,
+    },
+  },
+});
+
+// Usage:
+logger.info({ restaurantId, queryId }, 'Search completed');
+logger.error({ error, context }, 'Feature extraction failed');
+```
+
+================================================================================
+END OF IMPLEMENTATION PLAN
+================================================================================
+
+This plan provides a complete roadmap from setup to production. Follow phases
+sequentially for best results. Each phase builds on the previous one and
+produces a working deliverable.
+
+Key success factors:
+- Start with test data (don't build extraction pipeline first)
+- Test scoring algorithm thoroughly before adding real data
+- Monitor LLM costs closely (set budgets)
+- Deploy early and often
+- Focus on core value: matching algorithm quality
+
+For questions or issues, refer to specific sections above.

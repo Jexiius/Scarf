@@ -1,0 +1,51 @@
+{
+  "name": "scarf",
+  "version": "1.0.0",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
+    "migrate": "tsx scripts/migrate.ts",
+    "seed": "tsx scripts/seed.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jexiius/Scarf.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Jexiius/Scarf/issues"
+  },
+  "homepage": "https://github.com/Jexiius/Scarf#readme",
+  "description": "",
+  "dependencies": {
+    "@hono/node-server": "^1.19.5",
+    "@hono/zod-validator": "^0.7.4",
+    "bcrypt": "^6.0.0",
+    "bcryptjs": "^3.0.2",
+    "dotenv": "^17.2.3",
+    "drizzle-orm": "^0.44.7",
+    "hono": "^4.10.3",
+    "openai": "^6.7.0",
+    "pg": "^8.16.3",
+    "pino": "^10.1.0",
+    "uuid": "^13.0.0",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
+    "@types/node": "^24.9.1",
+    "@types/pg": "^8.15.6",
+    "drizzle-kit": "^0.31.5",
+    "pino-pretty": "^13.1.2",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
