@@ -1,4 +1,5 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
+import { DatabaseError } from 'pg';
 import { db } from '../config/database';
 import {
   processingQueue,
@@ -11,23 +12,47 @@ export type QueueTask = ProcessingQueueTask;
 
 export class QueueRepository {
   async addTask(restaurantId: string, taskType: TaskType, priority: number = 0): Promise<QueueTask> {
-    const [task] = await db
-      .insert(processingQueue)
-      .values({
-        restaurantId,
-        taskType,
-        priority,
-        status: 'pending',
-        attempts: 0,
-        maxAttempts: 3,
-      })
-      .returning();
+    try {
+      const [task] = await db
+        .insert(processingQueue)
+        .values({
+          restaurantId,
+          taskType,
+          priority,
+          status: 'pending',
+          attempts: 0,
+          maxAttempts: 3,
+        })
+        .returning();
 
-    if (!task) {
-      throw new Error('Failed to insert queue task');
+      if (!task) {
+        throw new Error('Failed to insert queue task');
+      }
+
+      return task;
+    } catch (error) {
+      if (error instanceof DatabaseError && error.code === '23505') {
+        const [existing] = await db
+          .select()
+          .from(processingQueue)
+          .where(
+            and(
+              eq(processingQueue.restaurantId, restaurantId),
+              eq(processingQueue.taskType, taskType),
+              inArray(processingQueue.status, ['pending', 'processing']),
+            ),
+          )
+          .limit(1);
+
+        if (!existing) {
+          throw new Error('Queue task conflict occurred but existing task was not found');
+        }
+
+        return existing;
+      }
+
+      throw error;
     }
-
-    return task;
   }
 
   async addTasks(
@@ -52,13 +77,19 @@ export class QueueRepository {
       .onConflictDoNothing();
   }
 
-  async claimNextTask(): Promise<QueueTask | null> {
+  async claimNextTask(allowedTypes?: TaskType[]): Promise<QueueTask | null> {
     try {
       const result = await db.transaction(async (tx) => {
+        const conditions = [eq(processingQueue.status, 'pending')];
+
+        if (allowedTypes && allowedTypes.length > 0) {
+          conditions.push(inArray(processingQueue.taskType, allowedTypes));
+        }
+
         const [task] = await tx
           .select()
           .from(processingQueue)
-          .where(eq(processingQueue.status, 'pending'))
+          .where(and(...conditions))
           .orderBy(sql`${processingQueue.priority} DESC, ${processingQueue.createdAt} ASC`)
           .limit(1)
           .for('update', { skipLocked: true });

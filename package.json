@@ -8,8 +8,14 @@
     "start": "node dist/server.js",
     "test": "vitest run",
     "test:watch": "vitest watch",
+    "test:setup": "tsx src/scripts/test-setup.ts",
     "migrate": "tsx scripts/migrate.ts",
-    "seed": "tsx scripts/seed.ts"
+    "seed": "tsx scripts/seed.ts",
+    "seed:midtown": "tsx src/scripts/seed-midtown-restaurants.ts",
+    "worker": "tsx src/workers/review-scraper.ts",
+    "worker:scrape": "tsx src/workers/review-scraper.ts",
+    "worker:extract": "tsx src/workers/feature-extractor.ts",
+    "worker:aggregate": "tsx src/workers/feature-aggregator.ts"
   },
   "keywords": [],
   "author": "",
@@ -26,6 +32,7 @@
   "dependencies": {
     "@hono/node-server": "^1.19.5",
     "@hono/zod-validator": "^0.7.4",
+    "axios": "^1.13.1",
     "bcrypt": "^6.0.0",
     "bcryptjs": "^3.0.2",
     "dotenv": "^17.2.3",
@@ -39,7 +46,7 @@
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
-    "@types/node": "^24.9.1",
+    "@types/node": "^24.9.2",
     "@types/pg": "^8.15.6",
     "drizzle-kit": "^0.31.5",
     "pino-pretty": "^13.1.2",

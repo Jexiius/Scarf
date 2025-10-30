@@ -35,7 +35,7 @@ function buildRestaurant(overrides: Partial<Restaurant>): Restaurant {
 
 function buildFeatures(
   restaurantId: string,
-  overrides: Partial<Record<keyof RestaurantFeature, number | string | null>>,
+  overrides: Partial<Record<keyof RestaurantFeature, number | string | Date | null>>,
 ): RestaurantFeature {
   const base: RestaurantFeature = {
     id: `feature-${restaurantId}`,
@@ -70,10 +70,10 @@ function buildFeatures(
     lateNight: null,
     formality: null,
     goodValue: null,
-    splurgeWorthy: null,
-    popularity: null,
-    confidenceScore: null,
-    reviewCountAnalyzed: null,
+   splurgeWorthy: null,
+   popularity: null,
+    confidenceScore: '0.9',
+    reviewCountAnalyzed: 12,
     lastUpdatedAt: now,
     modelVersion: null,
   };
@@ -91,6 +91,8 @@ describe('ScoringService', () => {
     const features = buildFeatures(restaurant.id, {
       romantic: '0.9',
       cozy: '0.8',
+      confidenceScore: '0.95',
+      reviewCountAnalyzed: 24,
     });
 
     const result = scoringService.scoreRestaurants(
@@ -107,14 +109,19 @@ describe('ScoringService', () => {
       10,
     );
 
-    expect(result[0].matchScore).toBeGreaterThan(0.9);
+    expect(result[0].featureScore).toBeGreaterThanOrEqual(0.85);
+    expect(result[0].matchScore).toBeGreaterThan(0.8);
     expect(result[0].featureMatches.romantic.match).toBe(1);
+    expect(result[0].dataQuality.confidence).toBeCloseTo(0.95, 2);
+    expect(result[0].dataQuality.warnings).toHaveLength(0);
   });
 
   it('penalizes required features when they do not match', () => {
     const restaurant = buildRestaurant({ id: 'restaurant-2', latitude: '40.75', longitude: '-73.98' });
     const features = buildFeatures(restaurant.id, {
       romantic: '0.2',
+      confidenceScore: '0.85',
+      reviewCountAnalyzed: 18,
     });
 
     const result = scoringService.scoreRestaurants(
@@ -131,6 +138,7 @@ describe('ScoringService', () => {
     );
 
     expect(result[0].matchScore).toBeLessThan(0.6);
+    expect(result[0].dataQuality.warnings).toHaveLength(0);
   });
 
   it('sorts restaurants by match score and filters outside radius', () => {
@@ -163,5 +171,56 @@ describe('ScoringService', () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].id).toBe('restaurant-3');
+  });
+
+  it('adds warnings and lowers score for low confidence data', () => {
+    const restaurant = buildRestaurant({ id: 'restaurant-5' });
+    const features = buildFeatures(restaurant.id, {
+      romantic: '0.92',
+      confidenceScore: '0.32',
+      reviewCountAnalyzed: 2,
+      lastUpdatedAt: new Date(Date.now() - 40 * 24 * 60 * 60 * 1000),
+    });
+
+    const [scored] = scoringService.scoreRestaurants(
+      [{ restaurant, features }],
+      {
+        features: {
+          romantic: { weight: 1, target: 0.9 },
+        },
+        intent: 'date_night',
+        confidence: 1,
+      },
+      { lat: 40.7589, lng: -73.9851 },
+      10,
+    );
+
+    expect(scored.featureScore).toBeGreaterThan(0.8);
+    expect(scored.matchScore).toBeLessThan(scored.featureScore);
+    expect(scored.dataQuality.warnings).toEqual(
+      expect.arrayContaining(['low_confidence', 'insufficient_reviews', 'stale_features']),
+    );
+    expect(scored.explanation).toContain('Confidence is limited');
+  });
+
+  it('flags missing features and provides fallback explanation', () => {
+    const restaurant = buildRestaurant({ id: 'restaurant-6' });
+
+    const [scored] = scoringService.scoreRestaurants(
+      [{ restaurant, features: null }],
+      {
+        features: {
+          romantic: { weight: 1, target: 0.9 },
+        },
+        intent: 'date_night',
+        confidence: 1,
+      },
+      { lat: 40.7589, lng: -73.9851 },
+      10,
+    );
+
+    expect(scored.matchScore).toBe(0);
+    expect(scored.dataQuality.warnings).toEqual(expect.arrayContaining(['missing_features']));
+    expect(scored.explanation).toContain('does not have enough recent review data');
   });
 });

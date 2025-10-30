@@ -3,6 +3,7 @@ import { env } from '../config/env';
 interface PlacesSearchResponse {
   status: string;
   results: PlaceSearchResult[];
+  next_page_token?: string;
   error_message?: string;
 }
 
@@ -107,31 +108,64 @@ export class GooglePlacesService {
     longitude: number,
     radiusMeters = 2_500,
     keyword?: string,
+    maxResults = 60,
   ): Promise<PlaceSearchResult[]> {
-    try {
-      const data = await this.getJson<PlacesSearchResponse>('/nearbysearch/json', {
+    const collected: PlaceSearchResult[] = [];
+    let pageToken: string | undefined;
+    let page = 0;
+
+    while (page < 3 && collected.length < maxResults) {
+      if (pageToken) {
+        await this.rateLimitDelay(2_000);
+      }
+
+      const params: Record<string, string | number | undefined> = {
         key: this.apiKey,
-        location: `${latitude},${longitude}`,
-        radius: radiusMeters,
         type: 'restaurant',
         keyword,
-      });
+      };
 
-      if (data.status === 'ZERO_RESULTS') {
-        console.log('⚠️  No results found');
-        return [];
+      if (pageToken) {
+        params.pagetoken = pageToken;
+      } else {
+        params.location = `${latitude},${longitude}`;
+        params.radius = radiusMeters;
       }
 
-      if (data.status !== 'OK') {
-        throw new Error(`Places API error: ${data.status} - ${data.error_message ?? 'Unknown error'}`);
-      }
+      try {
+        const data = await this.getJson<PlacesSearchResponse>('/nearbysearch/json', params);
 
-      console.log(`✅ Found ${data.results.length} restaurants`);
-      return data.results;
-    } catch (error) {
-      this.logError('searchRestaurants', error);
-      throw this.wrapError(error, 'Places API request failed');
+        if (data.status === 'ZERO_RESULTS') {
+          console.log('⚠️  No results found for this search');
+          break;
+        }
+
+        if (data.status === 'INVALID_REQUEST' && pageToken) {
+          console.log('⏳ Next page token not ready, retrying...');
+          await this.rateLimitDelay(2_000);
+          continue;
+        }
+
+        if (data.status !== 'OK') {
+          throw new Error(`Places API error: ${data.status} - ${data.error_message ?? 'Unknown error'}`);
+        }
+
+        collected.push(...data.results);
+        console.log(`✅ Page ${page + 1}: fetched ${data.results.length} restaurants (total ${collected.length})`);
+
+        if (!data.next_page_token) {
+          break;
+        }
+
+        pageToken = data.next_page_token;
+        page += 1;
+      } catch (error) {
+        this.logError('searchRestaurants', error);
+        throw this.wrapError(error, 'Places API request failed');
+      }
     }
+
+    return collected.slice(0, maxResults);
   }
 
   async getPlaceDetails(placeId: string): Promise<PlaceDetails | null> {

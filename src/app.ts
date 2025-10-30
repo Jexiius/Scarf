@@ -6,6 +6,7 @@ import { errorHandler } from './middleware/error-handler';
 import { rateLimiter } from './middleware/rate-limit';
 import { requestLogger } from './middleware/request-logger';
 import authRouter from './routes/auth';
+import monitoringRouter from './routes/monitoring';
 import restaurantRouter from './routes/restaurants';
 import searchRouter from './routes/search';
 import userRouter from './routes/users';
@@ -25,6 +26,7 @@ app.route('/api/v1/search', searchRouter);
 app.route('/api/v1/auth', authRouter);
 app.route('/api/v1/restaurants', restaurantRouter);
 app.route('/api/v1/users', userRouter);
+app.route('/api/v1/monitoring', monitoringRouter);
 
 app.onError(errorHandler);
 

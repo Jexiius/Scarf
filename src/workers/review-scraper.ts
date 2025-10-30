@@ -1,3 +1,4 @@
+import { closePool } from '../config/database';
 import { GooglePlacesService } from '../services/google-places.service';
 import { RestaurantRepository } from '../repositories/restaurant.repository';
 import { QueueRepository, type QueueTask } from '../repositories/queue.repository';
@@ -116,16 +117,10 @@ export class QueueProcessor {
     while (this.isRunning) {
       let task: QueueTask | null = null;
       try {
-        task = await this.queueRepo.claimNextTask();
+        task = await this.queueRepo.claimNextTask(['scrape_reviews']);
 
         if (!task) {
           await this.sleep(5_000);
-          continue;
-        }
-
-        if (task.taskType !== 'scrape_reviews') {
-          console.log(`⏭️  Skipping task type: ${task.taskType}`);
-          await this.queueRepo.completeTask(task.id);
           continue;
         }
 
@@ -172,13 +167,26 @@ export class QueueProcessor {
 
 if (require.main === module) {
   const processor = new QueueProcessor();
+  let shuttingDown = false;
 
-  const shutdown = () => processor.stop();
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  const shutdown = async (code = 0) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    processor.stop();
+    try {
+      await closePool();
+    } catch (error) {
+      console.error('Failed to close database pool:', error);
+    } finally {
+      process.exit(code);
+    }
+  };
 
-  processor.start().catch((error) => {
+  process.on('SIGTERM', () => shutdown(0));
+  process.on('SIGINT', () => shutdown(0));
+
+  processor.start().catch(async (error) => {
     console.error('💥 Worker crashed:', error);
-    process.exit(1);
+    await shutdown(1);
   });
 }

@@ -1,40 +1,6 @@
 import { z } from 'zod';
 import { MODELS, openai } from '../config/openai';
-
-export const FEATURE_NAMES = [
-  'romantic',
-  'cozy',
-  'casual',
-  'noise_level',
-  'energy_level',
-  'crowdedness',
-  'good_for_dates',
-  'good_for_groups',
-  'family_friendly',
-  'business_appropriate',
-  'celebration_worthy',
-  'fast_service',
-  'attentive_service',
-  'authentic',
-  'creative_menu',
-  'comfort_food',
-  'healthy_options',
-  'portions_large',
-  'vegan_friendly',
-  'photogenic_food',
-  'decor_quality',
-  'photo_friendly_lighting',
-  'nice_views',
-  'trendy',
-  'outdoor_seating',
-  'easy_parking',
-  'reservations_needed',
-  'late_night',
-  'formality',
-  'good_value',
-  'splurge_worthy',
-  'popularity',
-] as const;
+import { FEATURE_NAMES } from '../constants/features';
 
 const parsedFeatureSchema = z.object({
   weight: z.number().min(0).max(1),

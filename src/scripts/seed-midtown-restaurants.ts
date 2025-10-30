@@ -31,6 +31,8 @@ export async function seedMidtownRestaurants(): Promise<void> {
       MIDTOWN_CENTER.latitude,
       MIDTOWN_CENTER.longitude,
       SEARCH_RADIUS_METERS,
+      undefined,
+      TARGET_RESTAURANT_COUNT,
     );
 
     if (places.length === 0) {

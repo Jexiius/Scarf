@@ -5,6 +5,7 @@ import {
   restaurants,
   reviews,
   type InsertRestaurant,
+  type InsertRestaurantFeature,
 } from '../db/schema';
 
 export interface FindActiveParams {
@@ -41,9 +42,9 @@ export interface CreateReviewInput {
   publishedAt?: Date;
 }
 
-function toDecimalString(value: number | null | undefined): string | null {
+function toDecimalString(value: number | null | undefined, precision: number = 2): string | null {
   if (typeof value === 'number' && !Number.isNaN(value)) {
-    return value.toString();
+    return value.toFixed(precision);
   }
   return null;
 }
@@ -249,5 +250,39 @@ export class RestaurantRepository {
         ),
       )
       .limit(100);
+  }
+
+  async upsertFeatures(
+    restaurantId: string,
+    features: Record<string, number | null>,
+    metadata: { reviewCountAnalyzed: number; confidenceScore: number | null; modelVersion: string | null },
+  ): Promise<void> {
+    const now = new Date();
+
+    const baseValues: Partial<InsertRestaurantFeature> = {
+      restaurantId,
+      reviewCountAnalyzed: metadata.reviewCountAnalyzed,
+      confidenceScore: toDecimalString(metadata.confidenceScore),
+      lastUpdatedAt: now,
+      modelVersion: metadata.modelVersion ?? null,
+    };
+
+    Object.entries(features).forEach(([key, value]) => {
+      (baseValues as Record<string, unknown>)[key] = toDecimalString(value, 2);
+    });
+
+    const insertValues = baseValues as InsertRestaurantFeature;
+    const { restaurantId: _ignored, ...updateValues } = insertValues;
+
+    await db
+      .insert(restaurantFeatures)
+      .values(insertValues)
+      .onConflictDoUpdate({
+        target: [restaurantFeatures.restaurantId],
+        set: {
+          ...updateValues,
+          lastUpdatedAt: now,
+        },
+      });
   }
 }

@@ -108,6 +108,33 @@ export const reviews = pgTable(
   }),
 );
 
+export const featureExtractions = pgTable(
+  'feature_extractions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    reviewId: uuid('review_id')
+      .notNull()
+      .references(() => reviews.id, { onDelete: 'cascade' })
+      .unique(),
+    restaurantId: uuid('restaurant_id')
+      .notNull()
+      .references(() => restaurants.id, { onDelete: 'cascade' }),
+    features: jsonb('features').notNull(),
+    extractionConfidence: decimal('extraction_confidence', { precision: 3, scale: 2 }),
+    modelUsed: text('model_used').notNull(),
+    promptVersion: text('prompt_version').notNull(),
+    extractedAt: timestamp('extracted_at').defaultNow(),
+    tokensUsed: integer('tokens_used'),
+    costUsd: decimal('cost_usd', { precision: 10, scale: 6 }),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    restaurantIdx: index('feature_extractions_restaurant_idx').on(table.restaurantId),
+    extractedIdx: index('feature_extractions_extracted_idx').on(table.extractedAt),
+  }),
+);
+
 export const processingQueue = pgTable(
   'processing_queue',
   {
@@ -154,6 +181,17 @@ export const restaurantsRelations = relations(restaurants, ({ one, many }) => ({
 export const reviewsRelations = relations(reviews, ({ one }) => ({
   restaurant: one(restaurants, {
     fields: [reviews.restaurantId],
+    references: [restaurants.id],
+  }),
+}));
+
+export const featureExtractionsRelations = relations(featureExtractions, ({ one }) => ({
+  review: one(reviews, {
+    fields: [featureExtractions.reviewId],
+    references: [reviews.id],
+  }),
+  restaurant: one(restaurants, {
+    fields: [featureExtractions.restaurantId],
     references: [restaurants.id],
   }),
 }));
@@ -265,6 +303,8 @@ export type RestaurantFeature = typeof restaurantFeatures.$inferSelect;
 export type InsertRestaurantFeature = typeof restaurantFeatures.$inferInsert;
 export type Review = typeof reviews.$inferSelect;
 export type InsertReview = typeof reviews.$inferInsert;
+export type FeatureExtraction = typeof featureExtractions.$inferSelect;
+export type InsertFeatureExtraction = typeof featureExtractions.$inferInsert;
 export type ProcessingQueueTask = typeof processingQueue.$inferSelect;
 export type InsertProcessingQueueTask = typeof processingQueue.$inferInsert;
 export type TaskType = ProcessingQueueTask['taskType'];
