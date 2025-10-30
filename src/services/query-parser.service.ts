@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { env } from '../config/env';
 import { MODELS, openai } from '../config/openai';
 import { FEATURE_NAMES } from '../constants/features';
 
@@ -43,7 +44,7 @@ Return only valid JSON with the following shape:
 
 export class QueryParserService {
   async parseQuery(queryText: string): Promise<ParsedQuery> {
-    if (process.env.NODE_ENV === 'test' || process.env.USE_QUERY_PARSER_STUB === 'true') {
+    if (env.isTest || process.env.USE_QUERY_PARSER_STUB === 'true') {
       return this.parseQueryFallback(queryText);
     }
 

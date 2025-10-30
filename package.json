@@ -9,13 +9,15 @@
     "test": "vitest run",
     "test:watch": "vitest watch",
     "test:setup": "tsx src/scripts/test-setup.ts",
-    "migrate": "tsx scripts/migrate.ts",
+    "migrate": "tsx src/scripts/run-migrations.ts",
+    "migrate:prod": "node dist/scripts/run-migrations.js",
     "seed": "tsx scripts/seed.ts",
     "seed:midtown": "tsx src/scripts/seed-midtown-restaurants.ts",
     "worker": "tsx src/workers/review-scraper.ts",
     "worker:scrape": "tsx src/workers/review-scraper.ts",
     "worker:extract": "tsx src/workers/feature-extractor.ts",
-    "worker:aggregate": "tsx src/workers/feature-aggregator.ts"
+    "worker:aggregate": "tsx src/workers/feature-aggregator.ts",
+    "security:audit": "npm audit --omit=dev"
   },
   "keywords": [],
   "author": "",

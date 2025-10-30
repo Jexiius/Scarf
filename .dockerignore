@@ -1,0 +1,12 @@
+node_modules
+npm-debug.log
+dist
+.git
+.gitignore
+.DS_Store
+tests
+docs
+phase3part1
+*.local
+*.log
+.env

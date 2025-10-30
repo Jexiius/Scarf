@@ -1,3 +1,4 @@
+import { env } from '../config/env';
 import { MODELS, openai } from '../config/openai';
 import {
   FEATURE_DESCRIPTIONS,
@@ -73,8 +74,7 @@ export class FeatureExtractionService {
   private readonly concurrency: number;
 
   constructor() {
-    const parsed = Number(process.env.FEATURE_EXTRACTION_CONCURRENCY ?? '3');
-    this.concurrency = Number.isFinite(parsed) && parsed > 0 ? Math.min(6, Math.floor(parsed)) : 3;
+    this.concurrency = Math.min(6, env.FEATURE_EXTRACTION_CONCURRENCY);
   }
 
   async extract(review: ReviewForExtraction): Promise<FeatureExtractionResult> {
@@ -82,7 +82,7 @@ export class FeatureExtractionService {
       throw new Error('Review text is required for feature extraction');
     }
 
-    if (process.env.NODE_ENV === 'test' || process.env.USE_FEATURE_EXTRACTION_STUB === 'true') {
+    if (env.isTest || process.env.USE_FEATURE_EXTRACTION_STUB === 'true') {
       return this.stubExtraction(review);
     }
 

@@ -1,3 +1,23 @@
+CREATE TABLE IF NOT EXISTS reviews (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  restaurant_id UUID NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+  author_name TEXT,
+  text TEXT NOT NULL,
+  rating INTEGER,
+  source TEXT NOT NULL,
+  source_review_id TEXT NOT NULL,
+  review_url TEXT,
+  published_at TIMESTAMP WITHOUT TIME ZONE,
+  scraped_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+  is_processed BOOLEAN NOT NULL DEFAULT FALSE,
+  processed_at TIMESTAMP WITHOUT TIME ZONE,
+  CONSTRAINT reviews_source_unique UNIQUE (source, source_review_id)
+);
+
+CREATE INDEX IF NOT EXISTS reviews_restaurant_idx ON reviews(restaurant_id);
+CREATE INDEX IF NOT EXISTS reviews_unprocessed_idx ON reviews(is_processed) WHERE is_processed = FALSE;
+CREATE INDEX IF NOT EXISTS reviews_published_idx ON reviews(published_at);
+
 CREATE TABLE IF NOT EXISTS feature_extractions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   review_id UUID NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,

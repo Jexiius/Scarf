@@ -5,6 +5,7 @@ import { auth } from './middleware/auth';
 import { errorHandler } from './middleware/error-handler';
 import { rateLimiter } from './middleware/rate-limit';
 import { requestLogger } from './middleware/request-logger';
+import { securityHeaders } from './middleware/security-headers';
 import authRouter from './routes/auth';
 import monitoringRouter from './routes/monitoring';
 import restaurantRouter from './routes/restaurants';
@@ -16,6 +17,7 @@ const app = new Hono<AppBindings>();
 
 app.use('*', requestLogger);
 app.use('*', cors());
+app.use('*', securityHeaders);
 app.use('*', prettyJSON());
 app.use('/api/*', auth);
 app.use('/api/*', rateLimiter());

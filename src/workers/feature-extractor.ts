@@ -1,4 +1,5 @@
 import { closePool } from '../config/database';
+import { env } from '../config/env';
 import { FeatureExtractionRepository } from '../repositories/feature-extraction.repository';
 import { QueueRepository, type QueueTask } from '../repositories/queue.repository';
 import { RestaurantRepository } from '../repositories/restaurant.repository';
@@ -14,8 +15,7 @@ export class FeatureExtractorWorker {
   private readonly batchSize: number;
 
   constructor() {
-    const parsed = Number(process.env.FEATURE_EXTRACTOR_BATCH_SIZE ?? '25');
-    this.batchSize = Number.isFinite(parsed) && parsed > 0 ? Math.min(100, Math.floor(parsed)) : 25;
+    this.batchSize = Math.min(100, env.FEATURE_EXTRACTOR_BATCH_SIZE);
   }
 
   async execute(restaurantId: string): Promise<void> {
