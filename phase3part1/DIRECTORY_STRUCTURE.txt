@@ -1,0 +1,10 @@
+./EXECUTION_GUIDE.md
+./IMPLEMENTATION_README.md
+./REVIEW_SCRAPING_GUIDE.md
+./START_HERE.md
+./src/repositories/queue.repository.ts
+./src/repositories/restaurant.repository.ts
+./src/scripts/seed-midtown-restaurants.ts
+./src/scripts/test-setup.ts
+./src/services/google-places.service.ts
+./src/workers/review-scraper.ts

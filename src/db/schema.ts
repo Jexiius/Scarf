@@ -10,7 +10,7 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 
 export const restaurants = pgTable('restaurants', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -80,10 +80,81 @@ export const restaurantFeatures = pgTable('restaurant_features', {
   modelVersion: text('model_version'),
 });
 
-export const restaurantsRelations = relations(restaurants, ({ one }) => ({
+export const reviews = pgTable(
+  'reviews',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    restaurantId: uuid('restaurant_id')
+      .notNull()
+      .references(() => restaurants.id, { onDelete: 'cascade' }),
+    authorName: text('author_name'),
+    text: text('text').notNull(),
+    rating: integer('rating'),
+    source: text('source').notNull(),
+    sourceReviewId: text('source_review_id').notNull(),
+    reviewUrl: text('review_url'),
+    publishedAt: timestamp('published_at'),
+    scrapedAt: timestamp('scraped_at').notNull().defaultNow(),
+    isProcessed: boolean('is_processed').notNull().default(false),
+    processedAt: timestamp('processed_at'),
+  },
+  (table) => ({
+    restaurantIdx: index('reviews_restaurant_idx').on(table.restaurantId),
+    unprocessedIdx: index('reviews_unprocessed_idx')
+      .on(table.isProcessed)
+      .where(sql`${table.isProcessed} = false`),
+    publishedIdx: index('reviews_published_idx').on(table.publishedAt),
+    sourceUnique: uniqueIndex('reviews_source_unique').on(table.source, table.sourceReviewId),
+  }),
+);
+
+export const processingQueue = pgTable(
+  'processing_queue',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    restaurantId: uuid('restaurant_id')
+      .notNull()
+      .references(() => restaurants.id, { onDelete: 'cascade' }),
+    taskType: text('task_type')
+      .$type<'scrape_reviews' | 'extract_features' | 'aggregate_features'>()
+      .notNull(),
+    priority: integer('priority').notNull().default(0),
+    status: text('status')
+      .$type<'pending' | 'processing' | 'completed' | 'failed'>()
+      .notNull()
+      .default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    maxAttempts: integer('max_attempts').notNull().default(3),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    startedAt: timestamp('started_at'),
+    completedAt: timestamp('completed_at'),
+  },
+  (table) => ({
+    activeTaskUnique: uniqueIndex('processing_queue_active_task_unique')
+      .on(table.restaurantId, table.taskType)
+      .where(sql`${table.status} IN ('pending', 'processing')`),
+    pendingIdx: index('processing_queue_pending_idx')
+      .on(table.priority, table.createdAt)
+      .where(sql`${table.status} = 'pending'`),
+    failedIdx: index('processing_queue_failed_idx')
+      .on(table.taskType, table.attempts)
+      .where(sql`${table.status} = 'failed'`),
+  }),
+);
+
+export const restaurantsRelations = relations(restaurants, ({ one, many }) => ({
   features: one(restaurantFeatures, {
     fields: [restaurants.id],
     references: [restaurantFeatures.restaurantId],
+  }),
+  reviews: many(reviews),
+}));
+
+export const reviewsRelations = relations(reviews, ({ one }) => ({
+  restaurant: one(restaurants, {
+    fields: [reviews.restaurantId],
+    references: [restaurants.id],
   }),
 }));
 
@@ -192,6 +263,12 @@ export type Restaurant = typeof restaurants.$inferSelect;
 export type InsertRestaurant = typeof restaurants.$inferInsert;
 export type RestaurantFeature = typeof restaurantFeatures.$inferSelect;
 export type InsertRestaurantFeature = typeof restaurantFeatures.$inferInsert;
+export type Review = typeof reviews.$inferSelect;
+export type InsertReview = typeof reviews.$inferInsert;
+export type ProcessingQueueTask = typeof processingQueue.$inferSelect;
+export type InsertProcessingQueueTask = typeof processingQueue.$inferInsert;
+export type TaskType = ProcessingQueueTask['taskType'];
+export type TaskStatus = ProcessingQueueTask['status'];
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
 export type SavedRestaurant = typeof savedRestaurants.$inferSelect;
