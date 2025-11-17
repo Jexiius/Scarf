@@ -139,10 +139,10 @@ CREATE INDEX idx_features_date ON restaurant_features (good_for_dates)
   UNIQUE(source, source_review_id)
 );
 
-CREATE INDEX idx_reviews_restaurant ON reviews (restaurant_id);
-CREATE INDEX idx_reviews_unprocessed ON reviews (is_processed) 
+CREATE INDEX reviews_restaurant_idx ON reviews (restaurant_id);
+CREATE INDEX reviews_unprocessed_idx ON reviews (is_processed) 
   WHERE is_processed = false;
-CREATE INDEX idx_reviews_published ON reviews (published_at DESC);
+CREATE INDEX reviews_published_idx ON reviews (published_at DESC);
 
 CREATE TABLE feature_extractions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -165,7 +165,7 @@ CREATE TABLE feature_extractions (
 );
 
 CREATE INDEX idx_extractions_review ON feature_extractions (review_id);
-CREATE INDEX idx_extractions_restaurant ON feature_extractions (restaurant_id);
+CREATE INDEX feature_extractions_restaurant_idx ON feature_extractions (restaurant_id);
 CREATE INDEX idx_extractions_date ON feature_extractions (extracted_at DESC);
 
 CREATE TABLE users (
@@ -232,7 +232,7 @@ CREATE TABLE user_queries (
   created_at TIMESTAMP DEFAULT NOW()
 );
 
-CREATE INDEX idx_queries_user ON user_queries (user_id);
+CREATE INDEX user_queries_user_idx ON user_queries (user_id);
 CREATE INDEX idx_queries_created ON user_queries (created_at DESC);
 CREATE INDEX idx_queries_selected ON user_queries (selected_restaurant_id) 
   WHERE selected_restaurant_id IS NOT NULL;
@@ -255,8 +255,8 @@ CREATE TABLE saved_restaurants (
   UNIQUE(user_id, restaurant_id)
 );
 
-CREATE INDEX idx_saved_user ON saved_restaurants (user_id);
-CREATE INDEX idx_saved_restaurant ON saved_restaurants (restaurant_id);
+CREATE INDEX saved_restaurants_user_idx ON saved_restaurants (user_id);
+CREATE INDEX saved_restaurants_restaurant_idx ON saved_restaurants (restaurant_id);
 
 CREATE TABLE processing_queue (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

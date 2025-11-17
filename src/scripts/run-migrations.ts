@@ -3,10 +3,80 @@ import { join } from 'node:path';
 import { sql } from 'drizzle-orm';
 import { closePool, db } from '../config/database';
 
+const DEFAULT_DB_WAIT_ATTEMPTS = parseEnvNumber(process.env.DB_WAIT_ATTEMPTS, 20);
+const DEFAULT_DB_WAIT_DELAY_MS = parseEnvNumber(process.env.DB_WAIT_DELAY_MS, 2_000);
+const DEFAULT_DB_WAIT_MAX_DELAY_MS = parseEnvNumber(process.env.DB_WAIT_MAX_DELAY_MS, 15_000);
+const shouldRunMigrations = parseEnvBoolean(process.env.RUN_MIGRATIONS, true);
+
+type WaitForDatabaseOptions = {
+  attempts?: number;
+  delayMs?: number;
+  maxDelayMs?: number;
+};
+
+type NodePostgresError = Error & {
+  code?: string;
+  severity?: string;
+  detail?: string;
+  hint?: string;
+};
+
+function parseEnvNumber(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed;
+  }
+  return fallback;
+}
+
+function parseEnvBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined) {
+    return fallback;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (['false', '0', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+  if (['true', '1', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+  return fallback;
+}
+
+function summarizeError(error: unknown): string {
+  if (error instanceof AggregateError) {
+    const nested = error.errors?.map((err) => summarizeError(err)).join('; ');
+    return `${error.message}${nested ? ` | nested: ${nested}` : ''}`;
+  }
+
+  if (error instanceof Error) {
+    const pgError = error as NodePostgresError;
+    const parts = [
+      pgError.message,
+      pgError.code && `code=${pgError.code}`,
+      pgError.severity && `severity=${pgError.severity}`,
+      pgError.detail && `detail=${pgError.detail}`,
+      pgError.hint && `hint=${pgError.hint}`,
+    ]
+      .filter(Boolean)
+      .join(' | ');
+
+    return parts;
+  }
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
 async function waitForDatabase({
-  attempts = 10,
-  delayMs = 2_000,
-}: { attempts?: number; delayMs?: number } = {}): Promise<void> {
+  attempts = DEFAULT_DB_WAIT_ATTEMPTS,
+  delayMs = DEFAULT_DB_WAIT_DELAY_MS,
+  maxDelayMs = DEFAULT_DB_WAIT_MAX_DELAY_MS,
+}: WaitForDatabaseOptions = {}): Promise<void> {
+  let currentDelay = delayMs;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       await db.execute(sql`SELECT 1`);
@@ -20,12 +90,16 @@ async function waitForDatabase({
       }
 
       const remaining = attempts - attempt;
-      console.warn(
-        `Database not ready (attempt ${attempt}/${attempts}). Retrying in ${delayMs / 1000}s... Remaining attempts: ${remaining}`,
-        error instanceof Error ? error.message : error,
-      );
+      const summary = summarizeError(error);
+      const delaySeconds = (currentDelay / 1000).toFixed(1);
 
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      console.warn(
+        `Database not ready (attempt ${attempt}/${attempts}). Retrying in ${delaySeconds}s... Remaining attempts: ${remaining}. ${summary}`,
+      );
+      console.warn('Database connection attempt failed with error object:', error);
+
+      await new Promise((resolve) => setTimeout(resolve, currentDelay));
+      currentDelay = Math.min(currentDelay * 2, maxDelayMs);
     }
   }
 }
@@ -64,6 +138,11 @@ async function runMigrations(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  if (!shouldRunMigrations) {
+    console.warn('RUN_MIGRATIONS is set to false. Skipping migrations.');
+    return;
+  }
+
   try {
     await waitForDatabase();
     await runMigrations();

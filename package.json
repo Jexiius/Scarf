@@ -11,6 +11,8 @@
     "test:setup": "tsx src/scripts/test-setup.ts",
     "migrate": "tsx src/scripts/run-migrations.ts",
     "migrate:prod": "node dist/scripts/run-migrations.js",
+    "db:test": "tsx src/scripts/test-database-connection.ts",
+    "db:test:prod": "node dist/scripts/test-database-connection.js",
     "seed": "tsx scripts/seed.ts",
     "seed:midtown": "tsx src/scripts/seed-midtown-restaurants.ts",
     "worker": "tsx src/workers/review-scraper.ts",

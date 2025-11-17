@@ -23,6 +23,10 @@ const pool = new Pool({
   ssl: resolveSslConfig(),
 });
 
+pool.on('error', (error) => {
+  console.error('❌ Database pool error:', error);
+});
+
 export const db = drizzle(pool, { schema });
 
 export async function testConnection(): Promise<void> {
