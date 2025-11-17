@@ -23,6 +23,7 @@
     "worker:scrape": "tsx src/workers/review-scraper.ts",
     "worker:extract": "tsx src/workers/feature-extractor.ts",
     "worker:aggregate": "tsx src/workers/feature-aggregator.ts",
+    "cleanup:rate-limits": "tsx src/scripts/cleanup-rate-limits.ts",
     "security:audit": "npm audit --omit=dev"
   },
   "keywords": [],

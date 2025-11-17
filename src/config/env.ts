@@ -23,12 +23,18 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().url(),
   DATABASE_SSL: z.enum(['require', 'disable']).optional(),
+  DATABASE_CA_PATH: z.string().optional(), // Path to CA certificate file
+  DATABASE_CA: z.string().optional(), // Inline CA certificate content
+  DATABASE_SSL_REJECT_UNAUTHORIZED: z.enum(['true', 'false']).optional(), // Allow disabling cert validation (dev only)
   OPENAI_API_KEY: z.string().min(1),
   JWT_SECRET: z.string().min(32).optional(),
   GOOGLE_PLACES_API_KEY: z.string().optional(),
   FEATURE_EXTRACTION_CONCURRENCY: z.coerce.number().int().positive().max(10).default(3),
   FEATURE_EXTRACTOR_BATCH_SIZE: z.coerce.number().int().positive().max(500).default(25),
   LOG_LEVEL: z.enum(LOG_LEVELS).default('info'),
+  MONITORING_ADMIN_EMAILS: z.string().optional(), // Comma-separated list of admin emails
+  MONITORING_ALLOWED_IPS: z.string().optional(), // Comma-separated list of allowed IPs/CIDR blocks
+  MONITORING_SERVICE_TOKEN: z.string().optional(), // Service-to-service token for monitoring access
 });
 
 type BaseEnv = z.infer<typeof envSchema>;
