@@ -74,11 +74,84 @@ The container entrypoint runs migrations on startup before launching the server.
 
 ## Testing
 
+### Unit and Integration Tests
+
 ```bash
 npm test
 ```
 
 Unit tests currently cover the scoring service. Set `USE_QUERY_PARSER_STUB=true` to exercise the search flow without calling OpenAI.
+
+### End-to-End Testing
+
+End-to-end tests can be run against any environment (local or Railway):
+
+```bash
+# Test against local server (default)
+npm run test:e2e
+
+# Test against Railway server - set URL inline
+RAILWAY_URL=https://scarf-production.up.railway.app npm run test:railway
+
+# Or set TEST_BASE_URL directly
+TEST_BASE_URL=https://scarf-production.up.railway.app npm run test:e2e
+
+# Or export it in your shell session (persists for multiple commands)
+export RAILWAY_URL=https://scarf-production.up.railway.app
+npm run test:railway
+```
+
+The E2E test suite (`tests/e2e/railway.test.ts`) covers:
+- Health check endpoint
+- User authentication (register/login)
+- Protected routes
+- Search functionality
+- Restaurant endpoints
+- Saved restaurants management
+- Query history
+- Error handling and validation
+
+### Manual Server Testing
+
+For quick manual testing of your Railway server:
+
+```bash
+# Test against local server
+npm run test:server
+
+# Test against Railway server - set URL inline
+RAILWAY_URL=https://scarf-production.up.railway.app npm run test:server
+
+# Or pass URL as command-line argument
+npm run test:server https://scarf-production.up.railway.app
+
+# Or export it in your shell session
+export RAILWAY_URL=https://scarf-production.up.railway.app
+npm run test:server
+```
+
+This script provides colored output and tests key endpoints interactively.
+
+### Health Check
+
+Quick health check for monitoring or CI/CD:
+
+```bash
+# Check local server
+npm run health:check
+
+# Check Railway server - set URL inline
+RAILWAY_URL=https://scarf-production.up.railway.app npm run health:check
+
+# Or pass URL as command-line argument
+npm run health:check https://scarf-production.up.railway.app
+
+# Or export it in your shell session
+export RAILWAY_URL=https://scarf-production.up.railway.app
+npm run health:check
+```
+
+The health check script returns exit code 0 on success and 1 on failure, making it suitable for automated monitoring.
 
 ## Tooling
 
