@@ -1,19 +1,20 @@
 import pino from 'pino';
 import { env } from '../config/env';
 
-const prettyTransport =
-  env.isProduction
-    ? null
-    : {
-        target: 'pino-pretty',
-        options: {
-          colorize: true,
-          translateTime: true,
-          ignore: 'pid,hostname',
-        },
-      };
-
-export const logger = pino({
+const loggerConfig: pino.LoggerOptions = {
   level: env.LOG_LEVEL,
-  ...(prettyTransport ? { transport: prettyTransport } : {}),
-});
+};
+
+// Only use pino-pretty in development
+if (!env.isProduction) {
+  loggerConfig.transport = {
+    target: 'pino-pretty',
+    options: {
+      colorize: true,
+      translateTime: true,
+      ignore: 'pid,hostname',
+    },
+  };
+}
+
+export const logger = pino(loggerConfig);
