@@ -5,8 +5,8 @@ const loggerConfig: pino.LoggerOptions = {
   level: env.LOG_LEVEL,
 };
 
-// Only use pino-pretty in development
-if (!env.isProduction) {
+// Only use pino-pretty in development (explicitly check for 'development' to be safe)
+if (process.env.NODE_ENV === 'development') {
   loggerConfig.transport = {
     target: 'pino-pretty',
     options: {
