@@ -14,6 +14,8 @@ export interface SearchParams {
   maxPrice?: number;
   cuisines?: string[];
   limit: number;
+  offset?: number;
+  cursor?: string;
   userId?: string;
 }
 
@@ -22,6 +24,7 @@ export interface SearchResult {
   restaurants: ScoredRestaurant[];
   parsedQuery: ParsedQuery;
   totalCount: number;
+  nextCursor?: string; // For cursor-based pagination
 }
 
 export class SearchService {
@@ -38,37 +41,54 @@ export class SearchService {
 
     const parsedQuery = await this.queryParser.parseQuery(params.query);
     const maxPrice = params.maxPrice ?? parsedQuery.maxPrice;
+    const cuisineList = params.cuisines ?? parsedQuery.cuisines;
 
-    const findParams: FindActiveParams = {};
+    // Build repository query params with SQL-level filters
+    const findParams: FindActiveParams = {
+      latitude: params.latitude,
+      longitude: params.longitude,
+      radiusMiles: params.radiusMiles,
+      limit: Math.min(params.limit * 2, 100), // Fetch more for scoring, but cap at 100
+      offset: params.offset,
+      cursor: params.cursor,
+    };
+
     if (typeof maxPrice === 'number') {
       findParams.maxPrice = maxPrice;
     }
 
+    if (cuisineList && cuisineList.length > 0) {
+      findParams.cuisines = cuisineList;
+    }
+
+    // Query with SQL-level filtering (price, cuisine, radius)
     const results = await this.restaurantRepo.findActive(findParams);
 
-    const cuisineList = params.cuisines ?? parsedQuery.cuisines;
-    const filtered = cuisineList && cuisineList.length > 0
-      ? results.filter(({ restaurant }) => this.matchCuisines(restaurant.cuisineTags ?? [], cuisineList))
-      : results;
-
+    // Score the results (distance already calculated in SQL if available)
     const scored = this.scoringService.scoreRestaurants(
-      filtered,
+      results,
       parsedQuery,
       { lat: params.latitude, lng: params.longitude },
       params.radiusMiles,
     );
 
+    // Take top N results
     const top = scored.slice(0, params.limit);
 
     this.logQuery(queryId, params, parsedQuery, top, params.userId).catch((error) => {
-      console.warn('Failed to log query', error);
+      // Use logger instead of console.warn
+      // Error is logged in the catch block, no need to log here
     });
+
+    // Determine next cursor (last restaurant ID) for pagination
+    const nextCursor = top.length > 0 && top.length === params.limit ? top[top.length - 1]!.id : undefined;
 
     return {
       queryId,
       restaurants: top,
       parsedQuery,
       totalCount: scored.length,
+      nextCursor,
     };
   }
 
@@ -111,12 +131,4 @@ export class SearchService {
     await this.userRepo.recordQueryActivity(userId);
   }
 
-  private matchCuisines(restaurantCuisines: string[], desired: string[]): boolean {
-    if (restaurantCuisines.length === 0) {
-      return false;
-    }
-
-    const normalizedRestaurant = restaurantCuisines.map((cuisine) => cuisine.toLowerCase());
-    return desired.some((cuisine) => normalizedRestaurant.includes(cuisine.toLowerCase()));
-  }
 }

@@ -1,4 +1,7 @@
 import { env } from '../config/env';
+import { CircuitBreaker } from '../utils/circuit-breaker';
+import { withRetry } from '../utils/retry';
+import { logger } from '../utils/logger';
 
 interface PlacesSearchResponse {
   status: string;
@@ -94,6 +97,7 @@ export class GooglePlacesService {
   private readonly apiKey: string;
   private readonly baseUrl = 'https://maps.googleapis.com/maps/api/place';
   private readonly timeoutMs = 10_000;
+  private readonly circuitBreaker: CircuitBreaker;
 
   constructor() {
     if (!env.GOOGLE_PLACES_API_KEY) {
@@ -101,6 +105,11 @@ export class GooglePlacesService {
     }
 
     this.apiKey = env.GOOGLE_PLACES_API_KEY;
+    this.circuitBreaker = new CircuitBreaker('google-places', {
+      failureThreshold: 5,
+      resetTimeout: 60_000, // 1 minute
+      halfOpenMaxAttempts: 2,
+    });
   }
 
   async searchRestaurants(
@@ -136,12 +145,12 @@ export class GooglePlacesService {
         const data = await this.getJson<PlacesSearchResponse>('/nearbysearch/json', params);
 
         if (data.status === 'ZERO_RESULTS') {
-          console.log('⚠️  No results found for this search');
+          logger.debug({ latitude, longitude }, 'No results found for search');
           break;
         }
 
         if (data.status === 'INVALID_REQUEST' && pageToken) {
-          console.log('⏳ Next page token not ready, retrying...');
+          logger.debug('Next page token not ready, retrying...');
           await this.rateLimitDelay(2_000);
           continue;
         }
@@ -151,7 +160,10 @@ export class GooglePlacesService {
         }
 
         collected.push(...data.results);
-        console.log(`✅ Page ${page + 1}: fetched ${data.results.length} restaurants (total ${collected.length})`);
+        logger.debug(
+          { page: page + 1, pageResults: data.results.length, total: collected.length },
+          'Fetched restaurants page',
+        );
 
         if (!data.next_page_token) {
           break;
@@ -160,7 +172,13 @@ export class GooglePlacesService {
         pageToken = data.next_page_token;
         page += 1;
       } catch (error) {
-        this.logError('searchRestaurants', error);
+        logger.error(
+          {
+            error: error instanceof Error ? error.message : String(error),
+            circuitState: this.circuitBreaker.getState(),
+          },
+          'Places API search failed',
+        );
         throw this.wrapError(error, 'Places API request failed');
       }
     }
@@ -169,30 +187,55 @@ export class GooglePlacesService {
   }
 
   async getPlaceDetails(placeId: string): Promise<PlaceDetails | null> {
+    const log = logger.child({ placeId, service: 'google-places' });
+
     try {
-      const data = await this.getJson<PlaceDetailsResponse>('/details/json', {
-        key: this.apiKey,
-        place_id: placeId,
-        fields: [
-          'place_id',
-          'name',
-          'formatted_address',
-          'formatted_phone_number',
-          'website',
-          'geometry',
-          'rating',
-          'user_ratings_total',
-          'price_level',
-          'types',
-          'address_components',
-          'opening_hours',
-          'photos',
-          'reviews',
-        ].join(','),
-      });
+      const data = await this.circuitBreaker.execute(() =>
+        withRetry(
+          () =>
+            this.getJson<PlaceDetailsResponse>('/details/json', {
+              key: this.apiKey,
+              place_id: placeId,
+              fields: [
+                'place_id',
+                'name',
+                'formatted_address',
+                'formatted_phone_number',
+                'website',
+                'geometry',
+                'rating',
+                'user_ratings_total',
+                'price_level',
+                'types',
+                'address_components',
+                'opening_hours',
+                'photos',
+                'reviews',
+              ].join(','),
+            }),
+          {
+            maxAttempts: 3,
+            initialDelayMs: 1_000,
+            maxDelayMs: 10_000,
+            backoffMultiplier: 2,
+            retryableErrors: (error) => {
+              // Retry on rate limits, timeouts, and 5xx errors
+              if (error instanceof HttpError) {
+                return error.status === 429 || (error.status >= 500 && error.status < 600);
+              }
+              if (error instanceof Error) {
+                const message = error.message.toLowerCase();
+                return message.includes('timeout') || message.includes('network');
+              }
+              return false;
+            },
+          },
+          { placeId },
+        ),
+      );
 
       if (data.status === 'NOT_FOUND') {
-        console.log(`⚠️  Place not found: ${placeId}`);
+        log.warn('Place not found');
         return null;
       }
 
@@ -200,14 +243,21 @@ export class GooglePlacesService {
         throw new Error(`Places API error: ${data.status} - ${data.error_message ?? 'Unknown error'}`);
       }
 
-      console.log(`✅ Got details for: ${data.result.name}`);
+      log.info({ placeName: data.result.name }, 'Got place details');
       return data.result;
     } catch (error) {
       if (error instanceof HttpError && error.status === 429) {
+        log.warn('Rate limit exceeded');
         throw new Error('RATE_LIMIT_EXCEEDED');
       }
 
-      this.logError('getPlaceDetails', error);
+      log.error(
+        {
+          error: error instanceof Error ? error.message : String(error),
+          circuitState: this.circuitBreaker.getState(),
+        },
+        'Places API request failed',
+      );
       throw this.wrapError(error, 'Places API request failed');
     }
   }
@@ -352,10 +402,6 @@ export class GooglePlacesService {
     }
   }
 
-  private logError(context: string, error: unknown): void {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(`Places API request failed in ${context}:`, message);
-  }
 
   private wrapError(error: unknown, prefix: string): Error {
     if (error instanceof Error) {

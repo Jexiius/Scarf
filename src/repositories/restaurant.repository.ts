@@ -1,4 +1,4 @@
-import { and, eq, lte, sql } from 'drizzle-orm';
+import { and, arrayOverlaps, eq, lte, sql } from 'drizzle-orm';
 import { db } from '../config/database';
 import {
   restaurantFeatures,
@@ -10,6 +10,13 @@ import {
 
 export interface FindActiveParams {
   maxPrice?: number;
+  cuisines?: string[];
+  latitude?: number;
+  longitude?: number;
+  radiusMiles?: number;
+  limit?: number;
+  offset?: number;
+  cursor?: string; // For cursor-based pagination
 }
 
 export interface CreateRestaurantInput {
@@ -60,18 +67,77 @@ export class RestaurantRepository {
   async findActive(params: FindActiveParams = {}) {
     const conditions = [eq(restaurants.isActive, true)];
 
+    // Price filter
     if (typeof params.maxPrice === 'number') {
       conditions.push(lte(restaurants.priceLevel, params.maxPrice));
     }
 
-    return db
+    // Cuisine filter (array overlap)
+    if (params.cuisines && params.cuisines.length > 0) {
+      conditions.push(arrayOverlaps(restaurants.cuisineTags, params.cuisines));
+    }
+
+    // Geospatial radius filter (using earthdistance extension)
+    if (
+      typeof params.latitude === 'number' &&
+      typeof params.longitude === 'number' &&
+      typeof params.radiusMiles === 'number'
+    ) {
+      const radiusMeters = params.radiusMiles * 1609.34; // Convert miles to meters
+      conditions.push(
+        sql`earth_distance(
+          ll_to_earth(${restaurants.latitude}::float, ${restaurants.longitude}::float),
+          ll_to_earth(${params.latitude}, ${params.longitude})
+        ) <= ${radiusMeters}`,
+      );
+    }
+
+    // Cursor-based pagination (if cursor provided, filter by id > cursor)
+    if (params.cursor) {
+      conditions.push(sql`${restaurants.id} > ${params.cursor}`);
+    }
+
+    let query = db
       .select({
         restaurant: restaurants,
         features: restaurantFeatures,
+        // Calculate distance if location provided
+        ...(typeof params.latitude === 'number' &&
+        typeof params.longitude === 'number'
+          ? {
+              distanceMiles: sql<number>`earth_distance(
+                ll_to_earth(${restaurants.latitude}::float, ${restaurants.longitude}::float),
+                ll_to_earth(${params.latitude}, ${params.longitude})
+              ) / 1609.34`.as('distance_miles'),
+            }
+          : {}),
       })
       .from(restaurants)
       .leftJoin(restaurantFeatures, eq(restaurants.id, restaurantFeatures.restaurantId))
       .where(and(...conditions));
+
+    // Order by distance if location provided, otherwise by id for consistent pagination
+    if (typeof params.latitude === 'number' && typeof params.longitude === 'number') {
+      query = query.orderBy(
+        sql`earth_distance(
+          ll_to_earth(${restaurants.latitude}::float, ${restaurants.longitude}::float),
+          ll_to_earth(${params.latitude}, ${params.longitude})
+        )`,
+        restaurants.id,
+      );
+    } else {
+      query = query.orderBy(restaurants.id);
+    }
+
+    // Apply limit and offset
+    if (typeof params.limit === 'number') {
+      query = query.limit(params.limit);
+    }
+    if (typeof params.offset === 'number') {
+      query = query.offset(params.offset);
+    }
+
+    return query;
   }
 
   async findById(id: string) {

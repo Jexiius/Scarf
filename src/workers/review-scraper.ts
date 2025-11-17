@@ -2,6 +2,7 @@ import { closePool } from '../config/database';
 import { GooglePlacesService } from '../services/google-places.service';
 import { RestaurantRepository } from '../repositories/restaurant.repository';
 import { QueueRepository, type QueueTask } from '../repositories/queue.repository';
+import { logger } from '../utils/logger';
 
 export class ReviewScraperWorker {
   private readonly placesService = new GooglePlacesService();
@@ -9,7 +10,8 @@ export class ReviewScraperWorker {
   private readonly queueRepo = new QueueRepository();
 
   async execute(restaurantId: string): Promise<void> {
-    console.log(`\n🔍 Scraping reviews for restaurant: ${restaurantId}`);
+    const log = logger.child({ restaurantId, worker: 'review-scraper' });
+    log.info('Starting review scraping');
 
     const record = await this.restaurantRepo.findById(restaurantId);
     if (!record) {
@@ -22,7 +24,7 @@ export class ReviewScraperWorker {
       throw new Error(`Restaurant has no Google Place ID: ${restaurantId}`);
     }
 
-    console.log(`📍 Restaurant: ${restaurant.name}`);
+    log.info({ restaurantName: restaurant.name, googlePlaceId: restaurant.googlePlaceId }, 'Scraping restaurant');
 
     const placeDetails = await this.placesService.getPlaceDetails(restaurant.googlePlaceId);
     if (!placeDetails) {
@@ -58,14 +60,14 @@ export class ReviewScraperWorker {
       hours: hours ?? null,
     });
 
-    console.log('✅ Updated restaurant metadata');
+    log.info('Updated restaurant metadata');
 
     if (!placeDetails.reviews || placeDetails.reviews.length === 0) {
-      console.log('⚠️  No reviews available from API');
+      log.warn('No reviews available from API');
       return;
     }
 
-    console.log(`📝 Found ${placeDetails.reviews.length} reviews`);
+    log.info({ reviewCount: placeDetails.reviews.length }, 'Found reviews from API');
 
     const created = await this.restaurantRepo.createReviews(
       placeDetails.reviews.map((review) => ({
@@ -79,12 +81,16 @@ export class ReviewScraperWorker {
       })),
     );
 
-    console.log(
-      `✅ Saved ${created} new reviews (${placeDetails.reviews.length - created} duplicates skipped)`,
+    log.info(
+      {
+        created,
+        duplicates: placeDetails.reviews.length - created,
+      },
+      'Saved reviews',
     );
 
     const totalReviews = await this.restaurantRepo.getReviewCount(restaurant.id);
-    console.log(`📊 Total reviews in DB: ${totalReviews}`);
+    log.info({ totalReviews }, 'Total reviews in database');
 
     if (created > 0) {
       const unprocessed = await this.restaurantRepo.getUnprocessedReviewCount(restaurant.id);
@@ -96,7 +102,7 @@ export class ReviewScraperWorker {
 
         if (!hasTask) {
           await this.queueRepo.addTask(restaurant.id, 'extract_features', 50);
-          console.log(`📋 Queued feature extraction task (${unprocessed} reviews to process)`);
+          log.info({ unprocessedReviews: unprocessed }, 'Queued feature extraction task');
         }
       }
     }
@@ -107,16 +113,20 @@ export class QueueProcessor {
   private readonly worker = new ReviewScraperWorker();
   private readonly queueRepo = new QueueRepository();
   private isRunning = false;
+  private lastRecoveryCheck = 0;
+  private readonly recoveryCheckInterval = 5 * 60 * 1000; // 5 minutes
 
   async start(): Promise<void> {
     this.isRunning = true;
-    console.log('🚀 Review Scraper Worker Started');
-    console.log('================================');
-    console.log('Watching for scrape_reviews tasks...\n');
+    const log = logger.child({ worker: 'review-scraper-processor' });
+    log.info('Review Scraper Worker Started');
 
     while (this.isRunning) {
       let task: QueueTask | null = null;
       try {
+        // Periodically reset stuck tasks
+        await this.checkAndResetStuckTasks(log);
+
         task = await this.queueRepo.claimNextTask(['scrape_reviews']);
 
         if (!task) {
@@ -124,24 +134,42 @@ export class QueueProcessor {
           continue;
         }
 
-        console.log(`\n⚡ Processing task: ${task.id}`);
-        console.log(`   Restaurant: ${task.restaurantId}`);
-        console.log(`   Attempt: ${task.attempts + 1}/${task.maxAttempts}`);
+        const taskLog = log.child({
+          taskId: task.id,
+          restaurantId: task.restaurantId,
+          attempt: task.attempts + 1,
+          maxAttempts: task.maxAttempts,
+        });
+
+        // Check if task was recovered from stuck state
+        if ((task as any)._wasStuck) {
+          taskLog.warn('Recovered stuck task');
+        }
+
+        taskLog.info('Processing scrape task');
 
         await this.worker.execute(task.restaurantId);
 
         await this.queueRepo.completeTask(task.id);
-        console.log('✅ Task completed successfully');
+        taskLog.info('Task completed successfully');
 
         const stats = await this.queueRepo.getQueueStats();
-        console.log(
-          `\n📊 Queue: ${stats.pending} pending, ${stats.processing} processing, ${stats.completed} completed`,
+        log.debug(
+          {
+            pending: stats.pending,
+            processing: stats.processing,
+            completed: stats.completed,
+          },
+          'Queue stats',
         );
 
         await this.sleep(2_000);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        console.error('\n❌ Task failed:', message);
+        const errorLog = task
+          ? log.child({ taskId: task.id, restaurantId: task.restaurantId })
+          : log;
+        errorLog.error({ error: message, stack: error instanceof Error ? error.stack : undefined }, 'Task failed');
 
         if (task) {
           await this.queueRepo.failTask(task.id, message);
@@ -152,11 +180,33 @@ export class QueueProcessor {
       }
     }
 
-    console.log('\n🛑 Worker stopped');
+    log.info('Worker stopped');
+  }
+
+  private async checkAndResetStuckTasks(log: ReturnType<typeof logger.child>): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastRecoveryCheck < this.recoveryCheckInterval) {
+      return;
+    }
+
+    this.lastRecoveryCheck = now;
+
+    try {
+      const resetCount = await this.queueRepo.resetStuckTasks();
+      if (resetCount > 0) {
+        log.warn({ resetCount }, 'Reset stuck tasks');
+      }
+    } catch (error) {
+      log.error(
+        {
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Failed to reset stuck tasks',
+      );
+    }
   }
 
   stop(): void {
-    console.log('\n⏸️  Stopping worker...');
     this.isRunning = false;
   }
 
@@ -176,7 +226,12 @@ if (require.main === module) {
     try {
       await closePool();
     } catch (error) {
-      console.error('Failed to close database pool:', error);
+      logger.error(
+        {
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Failed to close database pool',
+      );
     } finally {
       process.exit(code);
     }
@@ -186,7 +241,13 @@ if (require.main === module) {
   process.on('SIGINT', () => shutdown(0));
 
   processor.start().catch(async (error) => {
-    console.error('💥 Worker crashed:', error);
+    logger.error(
+      {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      },
+      'Worker crashed',
+    );
     await shutdown(1);
   });
 }

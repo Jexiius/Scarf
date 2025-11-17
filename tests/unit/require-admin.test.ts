@@ -201,21 +201,18 @@ describe('requireAdmin Middleware', () => {
 
   describe('Development Mode', () => {
     it('should allow access in development mode', async () => {
-      // Mock development mode
-      vi.doMock('../../src/config/env', () => ({
-        env: {
-          isDevelopment: true,
-        },
-      }));
+      const envModule = await import('../../src/config/env');
+      const original = envModule.env.isDevelopment;
+      envModule.env.isDevelopment = true;
 
       (mockContext.get as any).mockReturnValue(null);
       (mockContext.req.header as any).mockReturnValue(null);
 
-      // Re-import to get mocked env
-      const { requireAdmin: devRequireAdmin } = await import('../../src/middleware/require-admin');
-      await devRequireAdmin(mockContext as Context<AppBindings>, mockNext);
+      await requireAdmin(mockContext as Context<AppBindings>, mockNext);
 
       expect(mockNext).toHaveBeenCalled();
+
+      envModule.env.isDevelopment = original;
     });
   });
 
@@ -234,4 +231,3 @@ describe('requireAdmin Middleware', () => {
     });
   });
 });
-

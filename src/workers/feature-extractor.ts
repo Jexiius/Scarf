@@ -5,6 +5,7 @@ import { QueueRepository, type QueueTask } from '../repositories/queue.repositor
 import { RestaurantRepository } from '../repositories/restaurant.repository';
 import { ReviewRepository } from '../repositories/review.repository';
 import { FeatureExtractionService } from '../services/feature-extraction.service';
+import { logger } from '../utils/logger';
 
 export class FeatureExtractorWorker {
   private readonly reviewRepo = new ReviewRepository();
@@ -19,7 +20,9 @@ export class FeatureExtractorWorker {
   }
 
   async execute(restaurantId: string): Promise<void> {
-    console.log(`\n🧪 Extracting features for restaurant: ${restaurantId}`);
+    const log = logger.child({ restaurantId, worker: 'feature-extractor' });
+
+    log.info('Starting feature extraction');
 
     const restaurant = await this.restaurantRepo.findById(restaurantId);
     if (!restaurant) {
@@ -28,11 +31,11 @@ export class FeatureExtractorWorker {
 
     const reviews = await this.reviewRepo.findUnprocessedByRestaurant(restaurantId, this.batchSize);
     if (reviews.length === 0) {
-      console.log('No unprocessed reviews found for feature extraction');
+      log.info('No unprocessed reviews found');
       return;
     }
 
-    console.log(`📝 Processing ${reviews.length} reviews for ${restaurant.restaurant.name}`);
+    log.info({ reviewCount: reviews.length, restaurantName: restaurant.restaurant.name }, 'Processing reviews');
 
     const extractionInputs = reviews.map((review) => ({
       id: review.id,
@@ -65,24 +68,36 @@ export class FeatureExtractorWorker {
           totalTokens += item.result.tokensUsed.total;
           totalCost += item.result.costUsd;
 
-          console.log(`✅ Extracted features for review ${item.result.reviewId}`);
+          log.debug({ reviewId: item.result.reviewId }, 'Extracted features for review');
         } catch (error) {
-          console.error(
-            `❌ Failed to persist extraction for review ${item.review.id}:`,
-            error,
+          log.error(
+            {
+              reviewId: item.review.id,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            'Failed to persist extraction',
           );
         }
       } else if (item.error) {
-        console.warn(`⚠️ Feature extraction failed for review ${item.review.id}: ${item.error.message}`);
+        log.warn(
+          {
+            reviewId: item.review.id,
+            error: item.error.message,
+          },
+          'Feature extraction failed for review',
+        );
       }
     }
 
     if (successfulReviewIds.length > 0) {
       await this.reviewRepo.markProcessed(successfulReviewIds);
-      console.log(
-        `💾 Saved ${successfulReviewIds.length} extractions | Tokens: ${totalTokens} | Cost $${totalCost.toFixed(
-          4,
-        )}`,
+      log.info(
+        {
+          extractionCount: successfulReviewIds.length,
+          tokensUsed: totalTokens,
+          costUsd: totalCost,
+        },
+        'Saved feature extractions',
       );
 
       const hasAggregationTask = await this.queueRepo.taskExists(restaurantId, 'aggregate_features', [
@@ -92,7 +107,7 @@ export class FeatureExtractorWorker {
 
       if (!hasAggregationTask) {
         await this.queueRepo.addTask(restaurantId, 'aggregate_features', 40);
-        console.log('🪄 Queued aggregation task');
+        log.info('Queued aggregation task');
       }
     }
 
@@ -105,7 +120,7 @@ export class FeatureExtractorWorker {
 
       if (!hasPending) {
         await this.queueRepo.addTask(restaurantId, 'extract_features', 40);
-        console.log(`🔁 Re-queued extraction task (${remaining} reviews remaining)`);
+        log.info({ remainingReviews: remaining }, 'Re-queued extraction task');
       }
     }
   }
@@ -115,15 +130,20 @@ export class FeatureExtractionQueueProcessor {
   private readonly worker = new FeatureExtractorWorker();
   private readonly queueRepo = new QueueRepository();
   private isRunning = false;
+  private lastRecoveryCheck = 0;
+  private readonly recoveryCheckInterval = 5 * 60 * 1000; // 5 minutes
 
   async start(): Promise<void> {
     this.isRunning = true;
-    console.log('🚀 Feature Extraction Worker Started');
-    console.log('===================================');
+    const log = logger.child({ worker: 'feature-extraction-processor' });
+    log.info('Feature Extraction Worker Started');
 
     while (this.isRunning) {
       let task: QueueTask | null = null;
       try {
+        // Periodically reset stuck tasks
+        await this.checkAndResetStuckTasks(log);
+
         task = await this.queueRepo.claimNextTask(['extract_features']);
 
         if (!task) {
@@ -131,23 +151,41 @@ export class FeatureExtractionQueueProcessor {
           continue;
         }
 
-        console.log(`\n⚡ Processing extraction task: ${task.id}`);
-        console.log(`   Restaurant: ${task.restaurantId}`);
-        console.log(`   Attempt: ${task.attempts + 1}/${task.maxAttempts}`);
+        const taskLog = log.child({
+          taskId: task.id,
+          restaurantId: task.restaurantId,
+          attempt: task.attempts + 1,
+          maxAttempts: task.maxAttempts,
+        });
+
+        // Check if task was recovered from stuck state
+        if ((task as any)._wasStuck) {
+          taskLog.warn('Recovered stuck task');
+        }
+
+        taskLog.info('Processing extraction task');
 
         await this.worker.execute(task.restaurantId);
         await this.queueRepo.completeTask(task.id);
-        console.log('✅ Extraction task completed');
+        taskLog.info('Extraction task completed');
 
         const stats = await this.queueRepo.getQueueStats();
-        console.log(
-          `\n📊 Queue Stats → Pending: ${stats.pending}, Processing: ${stats.processing}, Completed: ${stats.completed}`,
+        log.debug(
+          {
+            pending: stats.pending,
+            processing: stats.processing,
+            completed: stats.completed,
+          },
+          'Queue stats',
         );
 
         await this.sleep(2_000);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        console.error('\n❌ Extraction task failed:', message);
+        const errorLog = task
+          ? log.child({ taskId: task.id, restaurantId: task.restaurantId })
+          : log;
+        errorLog.error({ error: message, stack: error instanceof Error ? error.stack : undefined }, 'Extraction task failed');
 
         if (task) {
           await this.queueRepo.failTask(task.id, message);
@@ -157,7 +195,30 @@ export class FeatureExtractionQueueProcessor {
       }
     }
 
-    console.log('\n🛑 Feature extraction worker stopped');
+    log.info('Feature extraction worker stopped');
+  }
+
+  private async checkAndResetStuckTasks(log: ReturnType<typeof logger.child>): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastRecoveryCheck < this.recoveryCheckInterval) {
+      return;
+    }
+
+    this.lastRecoveryCheck = now;
+
+    try {
+      const resetCount = await this.queueRepo.resetStuckTasks();
+      if (resetCount > 0) {
+        log.warn({ resetCount }, 'Reset stuck tasks');
+      }
+    } catch (error) {
+      log.error(
+        {
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Failed to reset stuck tasks',
+      );
+    }
   }
 
   stop(): void {
@@ -180,7 +241,12 @@ if (require.main === module) {
     try {
       await closePool();
     } catch (error) {
-      console.error('Failed to close database pool:', error);
+      logger.error(
+        {
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Failed to close database pool',
+      );
     } finally {
       process.exit(code);
     }
@@ -190,7 +256,13 @@ if (require.main === module) {
   process.on('SIGINT', () => shutdown(0));
 
   processor.start().catch(async (error) => {
-    console.error('💥 Feature extraction worker crashed:', error);
+    logger.error(
+      {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      },
+      'Feature extraction worker crashed',
+    );
     await shutdown(1);
   });
 }

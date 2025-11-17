@@ -1,6 +1,8 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, lt, or, sql } from 'drizzle-orm';
 import { DatabaseError } from 'pg';
 import { db } from '../config/database';
+import { env } from '../config/env';
+import { logger } from '../utils/logger';
 import {
   processingQueue,
   type ProcessingQueueTask,
@@ -79,8 +81,21 @@ export class QueueRepository {
 
   async claimNextTask(allowedTypes?: TaskType[]): Promise<QueueTask | null> {
     try {
+      const timeoutMs = env.QUEUE_TASK_TIMEOUT_MS;
+      const timeoutThreshold = new Date(Date.now() - timeoutMs);
+
       const result = await db.transaction(async (tx) => {
-        const conditions = [eq(processingQueue.status, 'pending')];
+        // Claim pending tasks OR tasks that are stuck (processing but timed out)
+        const statusConditions = [
+          eq(processingQueue.status, 'pending'),
+          // Also claim tasks that are stuck (processing but startedAt is too old)
+          and(
+            eq(processingQueue.status, 'processing'),
+            sql`${processingQueue.startedAt} < ${timeoutThreshold}`,
+          ),
+        ];
+
+        const conditions = [or(...statusConditions)];
 
         if (allowedTypes && allowedTypes.length > 0) {
           conditions.push(inArray(processingQueue.taskType, allowedTypes));
@@ -98,11 +113,16 @@ export class QueueRepository {
           return null;
         }
 
+        // If task was stuck, log it
+        const wasStuck = task.status === 'processing' && task.startedAt && task.startedAt < timeoutThreshold;
+
         const [updatedTask] = await tx
           .update(processingQueue)
           .set({
             status: 'processing',
             startedAt: new Date(),
+            // Clear error if resetting a stuck task
+            ...(wasStuck ? { lastError: 'Task was reset after timeout' } : {}),
           })
           .where(eq(processingQueue.id, task.id))
           .returning();
@@ -111,12 +131,17 @@ export class QueueRepository {
           throw new Error('Failed to mark task as processing');
         }
 
-        return updatedTask;
+        return { ...updatedTask, _wasStuck: wasStuck };
       });
 
       return result ?? null;
     } catch (error) {
-      console.error('Failed to claim task:', error);
+      logger.error(
+        {
+          err: error instanceof Error ? error : undefined,
+        },
+        'Failed to claim queue task',
+      );
       return null;
     }
   }
@@ -155,10 +180,15 @@ export class QueueRepository {
       })
       .where(eq(processingQueue.id, taskId));
 
-    console.log(
-      `Task ${taskId} failed (attempt ${attempts}/${task.maxAttempts}). ${
-        shouldRetry ? 'Will retry.' : 'Max attempts reached.'
-      }`,
+    logger.warn(
+      {
+        taskId,
+        attempts,
+        maxAttempts: task.maxAttempts,
+        willRetry: shouldRetry,
+        lastError: error,
+      },
+      'Queue task failure recorded',
     );
   }
 
@@ -220,8 +250,9 @@ export class QueueRepository {
     return result;
   }
 
-  async getStuckTasks(): Promise<QueueTask[]> {
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+  async getStuckTasks(timeoutMs?: number): Promise<QueueTask[]> {
+    const timeout = timeoutMs ?? env.QUEUE_TASK_TIMEOUT_MS;
+    const threshold = new Date(Date.now() - timeout);
 
     const tasks = await db
       .select()
@@ -229,27 +260,28 @@ export class QueueRepository {
       .where(
         and(
           eq(processingQueue.status, 'processing'),
-          sql`${processingQueue.startedAt} < ${oneHourAgo}`,
+          sql`${processingQueue.startedAt} < ${threshold}`,
         ),
       );
 
     return tasks;
   }
 
-  async resetStuckTasks(): Promise<number> {
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+  async resetStuckTasks(timeoutMs?: number): Promise<number> {
+    const timeout = timeoutMs ?? env.QUEUE_TASK_TIMEOUT_MS;
+    const threshold = new Date(Date.now() - timeout);
 
     const result = await db
       .update(processingQueue)
       .set({
         status: 'pending',
         startedAt: null,
-        lastError: 'Task was stuck in processing state',
+        lastError: `Task was stuck in processing state (timeout: ${timeout}ms)`,
       })
       .where(
         and(
           eq(processingQueue.status, 'processing'),
-          sql`${processingQueue.startedAt} < ${oneHourAgo}`,
+          sql`${processingQueue.startedAt} < ${threshold}`,
         ),
       );
 

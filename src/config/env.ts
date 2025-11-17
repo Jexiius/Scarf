@@ -31,6 +31,7 @@ const envSchema = z.object({
   GOOGLE_PLACES_API_KEY: z.string().optional(),
   FEATURE_EXTRACTION_CONCURRENCY: z.coerce.number().int().positive().max(10).default(3),
   FEATURE_EXTRACTOR_BATCH_SIZE: z.coerce.number().int().positive().max(500).default(25),
+  QUEUE_TASK_TIMEOUT_MS: z.coerce.number().int().positive().default(30 * 60 * 1000), // 30 minutes default
   LOG_LEVEL: z.enum(LOG_LEVELS).default('info'),
   MONITORING_ADMIN_EMAILS: z.string().optional(), // Comma-separated list of admin emails
   MONITORING_ALLOWED_IPS: z.string().optional(), // Comma-separated list of allowed IPs/CIDR blocks

@@ -59,10 +59,16 @@ export class AuthService {
       throw new AppError(500, 'JWT secret not configured');
     }
 
+    const adminEmails = env.MONITORING_ADMIN_EMAILS
+      ? env.MONITORING_ADMIN_EMAILS.split(',').map((email) => email.trim().toLowerCase())
+      : [];
+    const isAdmin = adminEmails.includes(user.email.toLowerCase());
+
     const payload: UserPayload & JWTPayload = {
       id: user.id,
       email: user.email,
       subscriptionTier: user.subscriptionTier,
+      ...(isAdmin ? { isAdmin: true } : {}),
       exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7,
     };
 

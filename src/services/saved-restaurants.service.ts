@@ -1,6 +1,8 @@
 import { SavedRestaurantRepository } from '../repositories/saved-restaurant.repository';
 import { RestaurantRepository } from '../repositories/restaurant.repository';
 import { ValidationError, NotFoundError } from '../utils/errors';
+import { mapRestaurantToDto } from '../mappers/restaurant.mapper';
+import { mapSavedRestaurantToDto } from '../mappers/user.mapper';
 import type { Restaurant, RestaurantFeature, SavedRestaurant } from '../db/schema';
 
 interface SaveParams {
@@ -67,17 +69,18 @@ export class SavedRestaurantsService {
     restaurant: Restaurant;
     features?: RestaurantFeature | null;
   }) {
-    return {
-      id: record.saved.id,
-      notes: record.saved.notes,
-      tags: record.saved.tags ?? [],
-      savedAt: record.saved.createdAt,
-      personalRating:
-        typeof record.saved.personalRating === 'number' ? record.saved.personalRating : null,
-      visited: record.saved.visited ?? false,
-      visitedAt: record.saved.visitedAt ?? null,
-      restaurant: record.restaurant,
-      features: record.features,
-    };
+    const restaurantDto = mapRestaurantToDto(record.restaurant, record.features ?? null);
+    return mapSavedRestaurantToDto({
+      saved: {
+        id: record.saved.id,
+        notes: record.saved.notes,
+        tags: record.saved.tags,
+        createdAt: record.saved.createdAt,
+        personalRating: record.saved.personalRating,
+        visited: record.saved.visited,
+        visitedAt: record.saved.visitedAt,
+      },
+      restaurant: restaurantDto,
+    });
   }
 }

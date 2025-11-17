@@ -1,4 +1,4 @@
-import { and, eq, lt, sql } from 'drizzle-orm';
+import { eq, lt, sql } from 'drizzle-orm';
 import { db } from '../config/database';
 import { rateLimits } from '../db/schema';
 
@@ -18,59 +18,33 @@ export interface RateLimitStore {
 export class PostgresRateLimitStore implements RateLimitStore {
   async increment(key: string, windowMs: number): Promise<RateLimitRecord> {
     const now = new Date();
-    const resetAt = new Date(now.getTime() + windowMs);
+    const newResetAt = new Date(now.getTime() + windowMs);
 
-    // Check if record exists and is still valid
-    const existing = await this.get(key);
+    const [record] = await db
+      .insert(rateLimits)
+      .values({
+        key,
+        count: 1,
+        resetAt: newResetAt,
+      })
+      .onConflictDoUpdate({
+        target: rateLimits.key,
+        set: {
+          count: sql`CASE WHEN ${rateLimits.resetAt} <= NOW() THEN 1 ELSE ${rateLimits.count} + 1 END`,
+          resetAt: sql`CASE WHEN ${rateLimits.resetAt} <= NOW() THEN ${newResetAt} ELSE ${rateLimits.resetAt} END`,
+        },
+      })
+      .returning();
 
-    if (existing) {
-      // Record exists and is within window - increment
-      const [updated] = await db
-        .update(rateLimits)
-        .set({
-          count: sql`${rateLimits.count} + 1`,
-        })
-        .where(eq(rateLimits.key, key))
-        .returning();
-
-      if (!updated) {
-        throw new Error('Failed to update rate limit');
-      }
-
-      return {
-        key: updated.key,
-        count: Number(updated.count),
-        resetAt: updated.resetAt,
-      };
-    } else {
-      // Record doesn't exist or is expired - insert or reset
-      const result = await db
-        .insert(rateLimits)
-        .values({
-          key,
-          count: 1,
-          resetAt,
-        })
-        .onConflictDoUpdate({
-          target: rateLimits.key,
-          set: {
-            count: 1,
-            resetAt,
-          },
-        })
-        .returning();
-
-      const record = result[0];
-      if (!record) {
-        throw new Error('Failed to insert rate limit');
-      }
-
-      return {
-        key: record.key,
-        count: Number(record.count),
-        resetAt: record.resetAt,
-      };
+    if (!record) {
+      throw new Error('Failed to update rate limit');
     }
+
+    return {
+      key: record.key,
+      count: Number(record.count),
+      resetAt: record.resetAt,
+    };
   }
 
   async get(key: string): Promise<RateLimitRecord | null> {
@@ -119,4 +93,3 @@ export function getRateLimitStore(): RateLimitStore {
   }
   return storeInstance;
 }
-

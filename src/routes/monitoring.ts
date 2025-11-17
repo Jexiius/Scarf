@@ -1,5 +1,4 @@
 import { Hono } from 'hono';
-import { requireAuth } from '../middleware/auth';
 import { requireAdmin } from '../middleware/require-admin';
 import { MonitoringService } from '../services/monitoring.service';
 import type { AppBindings } from '../types/app';
@@ -7,8 +6,7 @@ import type { AppBindings } from '../types/app';
 const monitoringRouter = new Hono<AppBindings>();
 const monitoringService = new MonitoringService();
 
-// Require authentication first, then admin access
-monitoringRouter.use('*', requireAuth);
+// Monitoring access is controlled by requireAdmin (service token/IP/JWT)
 monitoringRouter.use('*', requireAdmin);
 
 monitoringRouter.get('/', async (c) => {

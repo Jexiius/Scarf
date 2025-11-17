@@ -4,7 +4,7 @@ This document converts the latest backend review into actionable initiatives. Tr
 
 ---
 
-## 1. Rate Limiting That Works in Production
+## 1. Rate Limiting That Works in Production _(Status: ✅ Completed)_
 **Goal:** prevent abuse across all API instances without letting attackers reset their quota.
 
 - Audit the current in-memory limiter (`src/middleware/rate-limit.ts`). Document how it relies on `Map` and spoofable headers.  
@@ -20,7 +20,7 @@ Deliverables: ADR or short design doc, updated middleware, regression tests that
 
 ---
 
-## 2. Lock Down the Monitoring API
+## 2. Lock Down the Monitoring API _(Status: ✅ Completed)_
 **Goal:** keep queue health and data-quality dashboards internal.
 
 - Identify the sensitivity of `/api/v1/monitoring` output (queue lengths, confidence scores, etc.).  
@@ -33,7 +33,7 @@ Deliverables: policy description, code changes, automated tests, README snippet 
 
 ---
 
-## 3. Make Search Scale
+## 3. Make Search Scale _(Status: 🚧 Planned)_
 **Goal:** avoid loading the entire restaurant table on each query.
 
 - Map the current flow (query parser → repo → scoring). Quantify how many restaurants are fetched and why filters are applied in memory.  
@@ -48,7 +48,7 @@ Deliverables: design notes, repository/query updates, DTO mappers, benchmarks co
 
 ---
 
-## 4. Normalize API Responses
+## 4. Normalize API Responses _(Status: 🚧 Planned)_
 **Goal:** expose consistent, client-friendly payloads.
 
 - Inventory every route returning raw DB rows (`restaurants`, `users/me/saved`, search results, etc.). Note fields that should stay internal (`isActive`, `modelVersion`, timestamps in PG `string` form).
@@ -64,7 +64,7 @@ Deliverables: mapper module(s), router updates, tests, refreshed documentation.
 
 ---
 
-## 5. Harden Database Connectivity
+## 5. Harden Database Connectivity _(Status: ✅ Completed)_
 **Goal:** ensure TLS validation in production and flexible config in dev.
 
 - Document the current SSL behavior (`src/config/database.ts`). Highlight the implicit `rejectUnauthorized: false`.
@@ -79,7 +79,7 @@ Deliverables: config changes, migration instructions, updated README section on 
 
 ---
 
-## 6. Keep Queue Workers Healthy
+## 6. Keep Queue Workers Healthy _(Status: ✅ Completed)_
 **Goal:** prevent stuck tasks and improve observability.
 
 - Review queue lifecycle in `QueueRepository`. Note unused helpers (`getStuckTasks`, `resetStuckTasks`).
@@ -94,7 +94,7 @@ Deliverables: worker updates, logging improvements, runbook describing how to mo
 
 ---
 
-## 7. Guard Third-Party Calls
+## 7. Guard Third-Party Calls _(Status: ✅ Completed)_
 **Goal:** stop OpenAI/Google hiccups from cascading.
 
 - Introduce circuit breakers or retry policies around OpenAI (feature extraction + query parsing) and Google Places (review scraper).  
@@ -106,7 +106,7 @@ Deliverables: resilience strategy doc, updated services/workers, dashboards or l
 
 ---
 
-## 8. Testing & Documentation Pass
+## 8. Testing & Documentation Pass _(Status: ✅ Completed)_
 **Goal:** keep confidence high as the backend evolves.
 
 - Expand automated tests to cover:
@@ -127,4 +127,3 @@ Deliverables: new/updated tests, documentation updates, and a short summary for 
 - Log exploratory findings (metrics, traces) in the PR description so future engineers understand trade-offs.
 - When blocked (e.g., needing Redis/Secrets), document assumptions and raise the dependency early.
 - Pair with senior engineers on the first iteration of each theme, then update this roadmap with lessons learned.
-

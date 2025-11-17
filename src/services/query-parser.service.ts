@@ -2,6 +2,9 @@ import { z } from 'zod';
 import { env } from '../config/env';
 import { MODELS, openai } from '../config/openai';
 import { FEATURE_NAMES } from '../constants/features';
+import { CircuitBreaker } from '../utils/circuit-breaker';
+import { withRetry } from '../utils/retry';
+import { logger } from '../utils/logger';
 
 const parsedFeatureSchema = z.object({
   weight: z.number().min(0).max(1),
@@ -43,21 +46,57 @@ Return only valid JSON with the following shape:
 }`;
 
 export class QueryParserService {
+  private readonly circuitBreaker: CircuitBreaker;
+
+  constructor() {
+    this.circuitBreaker = new CircuitBreaker('openai-query-parser', {
+      failureThreshold: 5,
+      resetTimeout: 60_000, // 1 minute
+      halfOpenMaxAttempts: 2,
+    });
+  }
+
   async parseQuery(queryText: string): Promise<ParsedQuery> {
     if (env.isTest || process.env.USE_QUERY_PARSER_STUB === 'true') {
       return this.parseQueryFallback(queryText);
     }
 
+    const log = logger.child({ service: 'query-parser', queryLength: queryText.length });
+
     try {
-      const response = await openai.chat.completions.create({
-        model: MODELS.FAST,
-        temperature: 0.3,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: QUERY_PARSING_PROMPT },
-          { role: 'user', content: queryText },
-        ],
-      });
+      const response = await this.circuitBreaker.execute(() =>
+        withRetry(
+          () =>
+            openai.chat.completions.create({
+              model: MODELS.FAST,
+              temperature: 0.3,
+              response_format: { type: 'json_object' },
+              messages: [
+                { role: 'system', content: QUERY_PARSING_PROMPT },
+                { role: 'user', content: queryText },
+              ],
+            }),
+          {
+            maxAttempts: 2, // Fewer retries for query parsing (user-facing, should fail fast)
+            initialDelayMs: 500,
+            maxDelayMs: 2_000,
+            backoffMultiplier: 2,
+            retryableErrors: (error) => {
+              if (error instanceof Error) {
+                const message = error.message.toLowerCase();
+                return (
+                  message.includes('rate limit') ||
+                  message.includes('timeout') ||
+                  message.includes('503') ||
+                  message.includes('502')
+                );
+              }
+              return false;
+            },
+          },
+          { queryLength: queryText.length },
+        ),
+      );
 
       const content = response.choices[0]?.message?.content;
 
@@ -66,9 +105,17 @@ export class QueryParserService {
       }
 
       const parsed = JSON.parse(content);
-      return parsedQuerySchema.parse(parsed);
+      const result = parsedQuerySchema.parse(parsed);
+      log.debug({ intent: result.intent, confidence: result.confidence }, 'Query parsed successfully');
+      return result;
     } catch (error) {
-      console.warn('Query parsing failed, using fallback:', error);
+      log.warn(
+        {
+          error: error instanceof Error ? error.message : String(error),
+          circuitState: this.circuitBreaker.getState(),
+        },
+        'Query parsing failed, using fallback',
+      );
       return this.parseQueryFallback(queryText);
     }
   }

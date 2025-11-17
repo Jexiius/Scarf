@@ -12,14 +12,14 @@ This endpoint is restricted to authorized operators only.
 
 ## Access Methods
 
-Access is granted if **ANY** of the following conditions are met:
+Access is granted if **ANY** of the following conditions are met. JWT-based paths require the request to include a valid bearer token (handled by the global `auth` middleware). Service-token/IP paths can be used without a JWT.
 
 ### 1. JWT Admin Flag
 
 Users with `isAdmin: true` in their JWT payload can access monitoring endpoints.
 
 **How to grant:**
-- Update the JWT token generation to include `isAdmin: true` for admin users
+- Add the operator's email to `MONITORING_ADMIN_EMAILS` (tokens automatically include `isAdmin: true` when issued to an allowlisted email), or update the JWT token generation to include `isAdmin: true` for admin users via another mechanism.
 - Example payload:
   ```json
   {
@@ -54,7 +54,7 @@ MONITORING_ALLOWED_IPS=192.168.1.100,10.0.0.50
 MONITORING_ALLOWED_IPS=192.168.1.0/24,10.0.0.0/16
 ```
 
-**Note:** IP resolution uses trusted proxy headers (`cf-connecting-ip`, `x-real-ip`). If behind a proxy, ensure these headers are set correctly.
+**Note:** IP resolution uses trusted proxy headers (`cf-connecting-ip`, `x-real-ip`). If behind a proxy, ensure these headers are set correctly. This method does not require a JWT.
 
 ### 4. Service Token
 
@@ -71,18 +71,17 @@ curl -H "X-Monitoring-Token: your-secure-random-token-here" \
      https://api.example.com/api/v1/monitoring
 ```
 
-**Security Note:** Use a strong, randomly generated token. Store it securely (e.g., in a secrets manager).
+**Security Note:** Use a strong, randomly generated token. Store it securely (e.g., in a secrets manager). This method does not require a JWT.
 
 ## Development Mode
 
 In development (`NODE_ENV=development`), monitoring access is **always granted** for easier testing. This bypass is logged at debug level.
 
-## Authentication Flow
+## Access Flow
 
-1. Request must include valid JWT token (via `requireAuth` middleware)
-2. Then access control is checked (via `requireAdmin` middleware)
-3. If any access method matches, request proceeds
-4. Otherwise, 403 Forbidden is returned
+1. Requests pass through the standard `auth` middleware so JWTs can be decoded if present.
+2. `requireAdmin` then evaluates the four access paths. Service-token/IP checks run even when no JWT is supplied.
+3. If any access method matches, the request proceeds; otherwise a 403 is returned.
 
 ## Example Usage
 
@@ -93,7 +92,7 @@ curl -H "Authorization: Bearer <jwt-token-with-isAdmin-true>" \
      https://api.example.com/api/v1/monitoring
 ```
 
-### Using Service Token
+### Using Service Token (no JWT required)
 
 ```bash
 curl -H "X-Monitoring-Token: <service-token>" \
@@ -151,8 +150,8 @@ All access attempts (granted and denied) are logged:
 1. **Check Authentication**: Ensure JWT token is valid
 2. **Check Admin Flag**: Verify `isAdmin: true` in JWT payload (if using method 1)
 3. **Check Email**: Verify email matches `MONITORING_ADMIN_EMAILS` (if using method 2)
-4. **Check IP**: Verify client IP matches `MONITORING_ALLOWED_IPS` (if using method 3)
-5. **Check Token**: Verify `X-Monitoring-Token` header matches `MONITORING_SERVICE_TOKEN` (if using method 4)
+4. **Check IP**: Verify client IP matches `MONITORING_ALLOWED_IPS` (if using method 3; JWT optional)
+5. **Check Token**: Verify `X-Monitoring-Token` header matches `MONITORING_SERVICE_TOKEN` (if using method 4; JWT optional)
 6. **Check Environment**: Verify environment variables are set correctly
 7. **Check Logs**: Review logs for specific denial reason
 
@@ -164,16 +163,15 @@ All access attempts (granted and denied) are logged:
 
 ## Migration from Previous Version
 
-Previously, monitoring only required authentication (`requireAuth`). Now it requires admin access.
+Previously, monitoring required only authentication (`requireAuth`). Now all requests must satisfy one of the access methods listed above.
 
 **To migrate existing users:**
 1. Add their emails to `MONITORING_ADMIN_EMAILS`, OR
-2. Update JWT generation to include `isAdmin: true` for admin users, OR
+2. Update JWT generation to include `isAdmin: true` for admin users (JWT path), OR
 3. Add their IPs to `MONITORING_ALLOWED_IPS`, OR
-4. Use service token authentication
+4. Issue and distribute a service token (`MONITORING_SERVICE_TOKEN`)
 
 ## References
 
 - [Middleware Implementation](../src/middleware/require-admin.ts)
 - [Monitoring Route](../src/routes/monitoring.ts)
-
