@@ -49,9 +49,14 @@ export class SearchService {
       longitude: params.longitude,
       radiusMiles: params.radiusMiles,
       limit: Math.min(params.limit * 2, 100), // Fetch more for scoring, but cap at 100
-      offset: params.offset,
-      cursor: params.cursor,
     };
+    
+    if (params.offset !== undefined) {
+      findParams.offset = params.offset;
+    }
+    if (params.cursor !== undefined) {
+      findParams.cursor = params.cursor;
+    }
 
     if (typeof maxPrice === 'number') {
       findParams.maxPrice = maxPrice;
@@ -83,13 +88,18 @@ export class SearchService {
     // Determine next cursor (last restaurant ID) for pagination
     const nextCursor = top.length > 0 && top.length === params.limit ? top[top.length - 1]!.id : undefined;
 
-    return {
+    const result: SearchResult = {
       queryId,
       restaurants: top,
       parsedQuery,
       totalCount: scored.length,
-      nextCursor,
     };
+    
+    if (nextCursor !== undefined) {
+      result.nextCursor = nextCursor;
+    }
+    
+    return result;
   }
 
   private async logQuery(

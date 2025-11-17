@@ -103,7 +103,7 @@ export async function testConnection(): Promise<void> {
     logger.info({ timestamp: now }, 'Database connection test successful');
     
     // Also verify SSL if enabled
-    const sslResult = await pool.query<{ ssl: boolean }>('SHOW ssl');
+    const sslResult = await pool.query<{ ssl: string }>('SHOW ssl');
     const sslEnabled = sslResult.rows[0]?.ssl === 'on';
     if (sslEnabled) {
       logger.info('Database SSL is enabled');

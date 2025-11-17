@@ -1,3 +1,4 @@
+import type pino from 'pino';
 import { closePool } from '../config/database';
 import { env } from '../config/env';
 import { FeatureExtractionRepository } from '../repositories/feature-extraction.repository';
@@ -198,7 +199,7 @@ export class FeatureExtractionQueueProcessor {
     log.info('Feature extraction worker stopped');
   }
 
-  private async checkAndResetStuckTasks(log: ReturnType<typeof logger.child>): Promise<void> {
+  private async checkAndResetStuckTasks(log: pino.Logger): Promise<void> {
     const now = Date.now();
     if (now - this.lastRecoveryCheck < this.recoveryCheckInterval) {
       return;

@@ -51,7 +51,14 @@ function isIpAllowed(clientIp: string, allowedIps: string): boolean {
 
     // CIDR block match (simple implementation for /24, /16, /8)
     if (allowedIp.includes('/')) {
-      const [network, prefixLength] = allowedIp.split('/');
+      const parts = allowedIp.split('/');
+      const network = parts[0];
+      const prefixLength = parts[1];
+      
+      if (!network || !prefixLength) {
+        return false;
+      }
+      
       const prefix = Number.parseInt(prefixLength, 10);
       
       // Simple CIDR matching for common cases
@@ -70,7 +77,7 @@ function isIpAllowed(clientIp: string, allowedIps: string): boolean {
       } else if (prefix === 8) {
         const networkPrefix = network.split('.')[0];
         const clientPrefix = clientIp.split('.')[0];
-        if (networkPrefix === clientPrefix) {
+        if (networkPrefix && clientPrefix && networkPrefix === clientPrefix) {
           return true;
         }
       }

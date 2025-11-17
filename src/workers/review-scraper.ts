@@ -1,3 +1,4 @@
+import type pino from 'pino';
 import { closePool } from '../config/database';
 import { GooglePlacesService } from '../services/google-places.service';
 import { RestaurantRepository } from '../repositories/restaurant.repository';
@@ -183,7 +184,7 @@ export class QueueProcessor {
     log.info('Worker stopped');
   }
 
-  private async checkAndResetStuckTasks(log: ReturnType<typeof logger.child>): Promise<void> {
+  private async checkAndResetStuckTasks(log: pino.Logger): Promise<void> {
     const now = Date.now();
     if (now - this.lastRecoveryCheck < this.recoveryCheckInterval) {
       return;
