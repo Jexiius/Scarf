@@ -1,5 +1,12 @@
+import { setDefaultResultOrder } from 'node:dns';
 import { config } from 'dotenv';
 import { z } from 'zod';
+
+try {
+  setDefaultResultOrder('ipv4first');
+} catch {
+  // Older Node.js versions may not support setDefaultResultOrder; ignore.
+}
 
 const dotenvOptions: Parameters<typeof config>[0] = {};
 
