@@ -1,4 +1,3 @@
-import type pino from 'pino';
 import { closePool } from '../config/database';
 import { FeatureExtractionRepository } from '../repositories/feature-extraction.repository';
 import { QueueRepository, type QueueTask } from '../repositories/queue.repository';
@@ -58,7 +57,7 @@ export class FeatureAggregationQueueProcessor {
       let task: QueueTask | null = null;
       try {
         // Periodically reset stuck tasks
-        await this.checkAndResetStuckTasks(log);
+        await this.checkAndResetStuckTasks(log as any);
 
         task = await this.queueRepo.claimNextTask(['aggregate_features']);
 
@@ -114,7 +113,7 @@ export class FeatureAggregationQueueProcessor {
     log.info('Feature aggregation worker stopped');
   }
 
-  private async checkAndResetStuckTasks(log: pino.Logger): Promise<void> {
+  private async checkAndResetStuckTasks(log: ReturnType<typeof logger.child>): Promise<void> {
     const now = Date.now();
     if (now - this.lastRecoveryCheck < this.recoveryCheckInterval) {
       return;
@@ -172,13 +171,7 @@ if (require.main === module) {
   process.on('SIGTERM', () => shutdown(0));
 
   processor.start().catch(async (error) => {
-    logger.error(
-      {
-        error: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined,
-      },
-      'Feature aggregation worker crashed',
-    );
+    console.error('💥 Feature aggregation worker crashed:', error);
     await shutdown(1);
   });
 }

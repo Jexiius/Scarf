@@ -97,41 +97,40 @@ export class RestaurantRepository {
       conditions.push(sql`${restaurants.id} > ${params.cursor}`);
     }
 
-    // Build select object
+    // Build query with conditional distance calculation
     const hasLocation = typeof params.latitude === 'number' && typeof params.longitude === 'number';
-    const selectObj: {
-      restaurant: typeof restaurants;
-      features: typeof restaurantFeatures;
-      distanceMiles?: ReturnType<typeof sql<number>>;
-    } = {
-      restaurant: restaurants,
-      features: restaurantFeatures,
-    };
-
+    
+    let query;
     if (hasLocation) {
-      selectObj.distanceMiles = sql<number>`earth_distance(
-        ll_to_earth(${restaurants.latitude}::float, ${restaurants.longitude}::float),
-        ll_to_earth(${params.latitude}, ${params.longitude})
-      ) / 1609.34`.as('distance_miles');
-    }
-
-    let query = db
-      .select(selectObj)
-      .from(restaurants)
-      .leftJoin(restaurantFeatures, eq(restaurants.id, restaurantFeatures.restaurantId))
-      .where(and(...conditions));
-
-    // Order by distance if location provided, otherwise by id for consistent pagination
-    if (hasLocation) {
-      query = query.orderBy(
-        sql`earth_distance(
-          ll_to_earth(${restaurants.latitude}::float, ${restaurants.longitude}::float),
-          ll_to_earth(${params.latitude}, ${params.longitude})
-        )`,
-        restaurants.id,
-      );
+      query = db
+        .select({
+          restaurant: restaurants,
+          features: restaurantFeatures,
+          distanceMiles: sql<number>`earth_distance(
+            ll_to_earth(${restaurants.latitude}::float, ${restaurants.longitude}::float),
+            ll_to_earth(${params.latitude}, ${params.longitude})
+          ) / 1609.34`.as('distance_miles'),
+        })
+        .from(restaurants)
+        .leftJoin(restaurantFeatures, eq(restaurants.id, restaurantFeatures.restaurantId))
+        .where(and(...conditions))
+        .orderBy(
+          sql`earth_distance(
+            ll_to_earth(${restaurants.latitude}::float, ${restaurants.longitude}::float),
+            ll_to_earth(${params.latitude}, ${params.longitude})
+          )`,
+          restaurants.id,
+        );
     } else {
-      query = query.orderBy(restaurants.id);
+      query = db
+        .select({
+          restaurant: restaurants,
+          features: restaurantFeatures,
+        })
+        .from(restaurants)
+        .leftJoin(restaurantFeatures, eq(restaurants.id, restaurantFeatures.restaurantId))
+        .where(and(...conditions))
+        .orderBy(restaurants.id);
     }
 
     // Apply limit and offset

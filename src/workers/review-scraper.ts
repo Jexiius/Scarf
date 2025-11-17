@@ -1,4 +1,3 @@
-import type pino from 'pino';
 import { closePool } from '../config/database';
 import { GooglePlacesService } from '../services/google-places.service';
 import { RestaurantRepository } from '../repositories/restaurant.repository';
@@ -126,7 +125,7 @@ export class QueueProcessor {
       let task: QueueTask | null = null;
       try {
         // Periodically reset stuck tasks
-        await this.checkAndResetStuckTasks(log);
+        await this.checkAndResetStuckTasks(log as any);
 
         task = await this.queueRepo.claimNextTask(['scrape_reviews']);
 
@@ -184,7 +183,7 @@ export class QueueProcessor {
     log.info('Worker stopped');
   }
 
-  private async checkAndResetStuckTasks(log: pino.Logger): Promise<void> {
+  private async checkAndResetStuckTasks(log: ReturnType<typeof logger.child>): Promise<void> {
     const now = Date.now();
     if (now - this.lastRecoveryCheck < this.recoveryCheckInterval) {
       return;
