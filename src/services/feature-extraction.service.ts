@@ -6,6 +6,9 @@ import {
   PROMPT_VERSION,
   type FeatureName,
 } from '../constants/features';
+import { CircuitBreaker } from '../utils/circuit-breaker';
+import { withRetry } from '../utils/retry';
+import { logger } from '../utils/logger';
 
 const INPUT_COST_PER_TOKEN = 0.15 / 1_000_000;
 const OUTPUT_COST_PER_TOKEN = 0.6 / 1_000_000;
@@ -72,9 +75,15 @@ export class FeatureExtractionService {
   private readonly model = MODELS.FAST;
   private readonly promptVersion = PROMPT_VERSION;
   private readonly concurrency: number;
+  private readonly circuitBreaker: CircuitBreaker;
 
   constructor() {
     this.concurrency = Math.min(6, env.FEATURE_EXTRACTION_CONCURRENCY);
+    this.circuitBreaker = new CircuitBreaker('openai-feature-extraction', {
+      failureThreshold: 5,
+      resetTimeout: 60_000, // 1 minute
+      halfOpenMaxAttempts: 2,
+    });
   }
 
   async extract(review: ReviewForExtraction): Promise<FeatureExtractionResult> {
@@ -86,40 +95,82 @@ export class FeatureExtractionService {
       return this.stubExtraction(review);
     }
 
-    const response = await openai.chat.completions.create({
-      model: this.model,
-      temperature: 0.2,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
+    const log = logger.child({ reviewId: review.id, service: 'feature-extraction' });
+
+    try {
+      const response = await this.circuitBreaker.execute(() =>
+        withRetry(
+          () =>
+            openai.chat.completions.create({
+              model: this.model,
+              temperature: 0.2,
+              response_format: { type: 'json_object' },
+              messages: [
+                { role: 'system', content: SYSTEM_PROMPT },
+                {
+                  role: 'user',
+                  content: JSON.stringify({
+                    review_text: review.text.slice(0, 4_000),
+                    rating: review.rating ?? null,
+                  }),
+                },
+              ],
+            }),
+          {
+            maxAttempts: 3,
+            initialDelayMs: 1_000,
+            maxDelayMs: 10_000,
+            backoffMultiplier: 2,
+            retryableErrors: (error) => {
+              // Retry on rate limits, timeouts, and 5xx errors
+              if (error instanceof Error) {
+                const message = error.message.toLowerCase();
+                return (
+                  message.includes('rate limit') ||
+                  message.includes('timeout') ||
+                  message.includes('503') ||
+                  message.includes('502') ||
+                  message.includes('500')
+                );
+              }
+              return false;
+            },
+          },
+          { reviewId: review.id },
+        ),
+      );
+
+      const content = response.choices[0]?.message?.content;
+      if (!content) {
+        throw new Error('Empty response from OpenAI feature extraction');
+      }
+
+      const parsed = this.parseExtraction(content);
+      const usage = this.parseUsage(response);
+      const costUsd = this.calculateCost(usage);
+
+      log.debug({ tokensUsed: usage.total, costUsd }, 'Feature extraction successful');
+
+      return {
+        reviewId: review.id,
+        features: parsed.features,
+        confidence: parsed.confidence,
+        promptVersion: this.promptVersion,
+        modelUsed: this.model,
+        tokensUsed: usage,
+        costUsd,
+      };
+    } catch (error) {
+      log.warn(
         {
-          role: 'user',
-          content: JSON.stringify({
-            review_text: review.text.slice(0, 4_000),
-            rating: review.rating ?? null,
-          }),
+          error: error instanceof Error ? error.message : String(error),
+          circuitState: this.circuitBreaker.getState(),
+          fallback: 'stub',
         },
-      ],
-    });
-
-    const content = response.choices[0]?.message?.content;
-    if (!content) {
-      throw new Error('Empty response from OpenAI feature extraction');
+        'Feature extraction failed, using stub output',
+      );
+      return this.stubExtraction(review);
     }
-
-    const parsed = this.parseExtraction(content);
-    const usage = this.parseUsage(response);
-    const costUsd = this.calculateCost(usage);
-
-    return {
-      reviewId: review.id,
-      features: parsed.features,
-      confidence: parsed.confidence,
-      promptVersion: this.promptVersion,
-      modelUsed: this.model,
-      tokensUsed: usage,
-      costUsd,
-    };
   }
 
   async extractBatch(reviews: ReviewForExtraction[]): Promise<BatchExtractionResult[]> {

@@ -297,6 +297,22 @@ export const userQueriesRelations = relations(userQueries, ({ one }) => ({
   }),
 }));
 
+export const rateLimits = pgTable(
+  'rate_limits',
+  {
+    key: text('key').primaryKey(),
+    count: integer('count').notNull().default(1),
+    resetAt: timestamp('reset_at').notNull(),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    resetAtIdx: index('rate_limits_reset_at_idx').on(table.resetAt),
+  }),
+);
+
+export type RateLimit = typeof rateLimits.$inferSelect;
+export type InsertRateLimit = typeof rateLimits.$inferInsert;
+
 export type Restaurant = typeof restaurants.$inferSelect;
 export type InsertRestaurant = typeof restaurants.$inferInsert;
 export type RestaurantFeature = typeof restaurantFeatures.$inferSelect;

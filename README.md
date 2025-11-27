@@ -39,9 +39,13 @@ See `docs/api.md` for request and response examples.
 
 - `NODE_ENV`, `PORT`, `DATABASE_URL`, `OPENAI_API_KEY`, and `JWT_SECRET` are required for production. `JWT_SECRET` must be at least 32 characters long.
 - Optional flags:
-  - `DATABASE_SSL`: set to `require` when connecting to managed Postgres instances that mandate TLS.
+  - `DATABASE_SSL`: set to `require` when connecting to managed Postgres instances that mandate TLS. See `docs/database-ssl-configuration.md` for CA/SSL guidance.
+  - `DATABASE_CA_PATH`/`DATABASE_CA`: provide CA bundles when your provider issues custom certificates.
+  - `DATABASE_SSL_REJECT_UNAUTHORIZED`: set to `false` only in development when working with self-signed certs.
   - `LOG_LEVEL`: `fatal`, `error`, `warn`, `info`, `debug`, `trace`, or `silent` (defaults to `info`).
+  - `MONITORING_ADMIN_EMAILS`, `MONITORING_ALLOWED_IPS`, `MONITORING_SERVICE_TOKEN`: configure access paths for `/api/v1/monitoring` (see `docs/monitoring-access-policy.md`).
   - `FEATURE_EXTRACTION_CONCURRENCY` and `FEATURE_EXTRACTOR_BATCH_SIZE` control worker throughput and are bounded to safe values.
+  - `QUEUE_TASK_TIMEOUT_MS`: timeout for queue tasks before they're considered stuck (default: 30 minutes).
 - Populate `.env` locally or supply variables through your orchestrator/secrets manager. For ad-hoc overrides, point `DOTENV_PATH` to a specific file.
 
 ## Production Deployment
@@ -152,6 +156,40 @@ npm run health:check
 ```
 
 The health check script returns exit code 0 on success and 1 on failure, making it suitable for automated monitoring.
+
+### Operational Scripts
+
+- `npm run cleanup:rate-limits` – purge expired entries from the shared rate limit store (schedule every few minutes in production).
+
+## Operations & Runbooks
+
+- **Rate Limiting** – Architecture, tuning guidance, and cleanup instructions live in `docs/adr-rate-limiting.md` and `docs/rate-limiting-runbook.md`.
+- **Monitoring Access** – Authentication paths (JWT flag, email/IP allowlists, service token) are described in `docs/monitoring-access-policy.md`.
+- **Database SSL** – Provider-specific TLS setup details are in `docs/database-ssl-configuration.md`.
+- **Queue Workers** – Health checks, stuck-task recovery, and worker lifecycle guidance lives in `docs/queue-health-runbook.md`.
+
+## Recent Improvements
+
+### Backend Hardening (Latest Release)
+
+This release includes significant improvements to security, reliability, and scalability:
+
+**Security:**
+- ✅ Production-ready rate limiting with shared PostgreSQL store (prevents bypass across instances)
+- ✅ Monitoring API access control (JWT admin flag, email/IP allowlists, service tokens)
+- ✅ Database SSL certificate validation enabled by default in production
+
+**Reliability:**
+- ✅ Circuit breakers and retry logic for OpenAI and Google Places API calls
+- ✅ Automatic recovery for stuck queue tasks
+- ✅ Structured logging throughout (replaced all `console.log` with Pino)
+
+**Performance:**
+- ✅ Geospatial search with SQL-level filtering (earthdistance extension)
+- ✅ Pagination support (cursor-based and offset)
+- ✅ Normalized API responses with DTO mappers
+
+See `docs/backend-hardening-roadmap.md` for detailed implementation notes and `CHANGELOG.md` for a complete list of changes.
 
 ## Tooling
 

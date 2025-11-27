@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { NotFoundError } from '../utils/errors';
 import { RestaurantRepository } from '../repositories/restaurant.repository';
+import { mapRestaurantToDto } from '../mappers/restaurant.mapper';
 import type { AppBindings } from '../types/app';
 
 const restaurantRepository = new RestaurantRepository();
@@ -15,28 +16,9 @@ restaurantRouter.get('/:id', async (c) => {
   }
 
   const { restaurant, features } = record;
+  const dto = mapRestaurantToDto(restaurant, features);
 
-  return c.json({
-    id: restaurant.id,
-    name: restaurant.name,
-    address: restaurant.address,
-    city: restaurant.city,
-    state: restaurant.state,
-    zipCode: restaurant.zipCode,
-    coordinates: {
-      lat: Number(restaurant.latitude),
-      lng: Number(restaurant.longitude),
-    },
-    priceLevel: restaurant.priceLevel,
-    rating: restaurant.googleRating ? Number(restaurant.googleRating) : null,
-    reviewCount: restaurant.googleReviewCount,
-    cuisineTags: restaurant.cuisineTags ?? [],
-    phone: restaurant.phone,
-    website: restaurant.website,
-    photos: restaurant.photoUrls ?? [],
-    hours: restaurant.hours,
-    features,
-  });
+  return c.json(dto);
 });
 
 export default restaurantRouter;

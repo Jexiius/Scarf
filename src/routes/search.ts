@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
 import { SearchService, type SearchParams } from '../services/search.service';
+import { mapScoredRestaurantToDto } from '../mappers/restaurant.mapper';
 import type { AppBindings } from '../types/app';
 
 const searchSchema = z.object({
@@ -12,6 +13,8 @@ const searchSchema = z.object({
   maxPrice: z.number().int().min(1).max(4).optional(),
   cuisines: z.array(z.string()).optional(),
   limit: z.number().int().min(1).max(20).default(10),
+  offset: z.number().int().min(0).optional(),
+  cursor: z.string().uuid().optional(), // Cursor-based pagination
 });
 
 const searchService = new SearchService();
@@ -35,11 +38,19 @@ searchRouter.post('/', zValidator('json', searchSchema), async (c) => {
   }
 
   if (typeof body.maxPrice === 'number') {
-    Object.assign(searchParams, { maxPrice: body.maxPrice });
+    searchParams.maxPrice = body.maxPrice;
   }
 
   if (body.cuisines && body.cuisines.length > 0) {
-    Object.assign(searchParams, { cuisines: body.cuisines });
+    searchParams.cuisines = body.cuisines;
+  }
+
+  if (typeof body.offset === 'number') {
+    searchParams.offset = body.offset;
+  }
+
+  if (body.cursor) {
+    searchParams.cursor = body.cursor;
   }
 
   const result = await searchService.search(searchParams);
@@ -47,12 +58,13 @@ searchRouter.post('/', zValidator('json', searchSchema), async (c) => {
   const processingTime = Date.now() - startTime;
 
   return c.json({
-    results: result.restaurants,
+    results: result.restaurants.map(mapScoredRestaurantToDto),
     queryUnderstood: result.parsedQuery,
     meta: {
       totalResults: result.totalCount,
       queryId: result.queryId,
       processingTimeMs: processingTime,
+      ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}),
     },
   });
 });

@@ -3,6 +3,7 @@ import { FeatureExtractionRepository } from '../repositories/feature-extraction.
 import { QueueRepository, type QueueTask } from '../repositories/queue.repository';
 import { RestaurantRepository } from '../repositories/restaurant.repository';
 import { FeatureAggregationService } from '../services/feature-aggregation.service';
+import { logger } from '../utils/logger';
 
 export class FeatureAggregatorWorker {
   private readonly featureRepo = new FeatureExtractionRepository();
@@ -10,11 +11,12 @@ export class FeatureAggregatorWorker {
   private readonly aggregationService = new FeatureAggregationService();
 
   async execute(restaurantId: string): Promise<void> {
-    console.log(`\n📈 Aggregating features for restaurant ${restaurantId}`);
+    const log = logger.child({ restaurantId, worker: 'feature-aggregator' });
+    log.info('Starting feature aggregation');
 
     const extractions = await this.featureRepo.getByRestaurant(restaurantId);
     if (extractions.length === 0) {
-      console.log('⚠️  No feature extractions available for aggregation');
+      log.warn('No feature extractions available for aggregation');
       return;
     }
 
@@ -28,10 +30,13 @@ export class FeatureAggregatorWorker {
 
     const cost = await this.featureRepo.getCostSummary(restaurantId);
 
-    console.log(
-      `✅ Aggregated ${aggregation.reviewCountAnalyzed} extractions | Confidence ${aggregation.confidenceScore} | Cost so far $${cost.costUsd.toFixed(
-        4,
-      )}`,
+    log.info(
+      {
+        extractionCount: aggregation.reviewCountAnalyzed,
+        confidenceScore: aggregation.confidenceScore,
+        costUsd: cost.costUsd,
+      },
+      'Aggregated features',
     );
   }
 }
@@ -40,15 +45,20 @@ export class FeatureAggregationQueueProcessor {
   private readonly worker = new FeatureAggregatorWorker();
   private readonly queueRepo = new QueueRepository();
   private isRunning = false;
+  private lastRecoveryCheck = 0;
+  private readonly recoveryCheckInterval = 5 * 60 * 1000; // 5 minutes
 
   async start(): Promise<void> {
     this.isRunning = true;
-    console.log('🚀 Feature Aggregation Worker Started');
-    console.log('====================================');
+    const log = logger.child({ worker: 'feature-aggregation-processor' });
+    log.info('Feature Aggregation Worker Started');
 
     while (this.isRunning) {
       let task: QueueTask | null = null;
       try {
+        // Periodically reset stuck tasks
+        await this.checkAndResetStuckTasks(log as any);
+
         task = await this.queueRepo.claimNextTask(['aggregate_features']);
 
         if (!task) {
@@ -56,21 +66,41 @@ export class FeatureAggregationQueueProcessor {
           continue;
         }
 
-        console.log(`\n⚡ Processing aggregation task: ${task.id} for restaurant ${task.restaurantId}`);
+        const taskLog = log.child({
+          taskId: task.id,
+          restaurantId: task.restaurantId,
+          attempt: task.attempts + 1,
+          maxAttempts: task.maxAttempts,
+        });
+
+        // Check if task was recovered from stuck state
+        if ((task as any)._wasStuck) {
+          taskLog.warn('Recovered stuck task');
+        }
+
+        taskLog.info('Processing aggregation task');
         await this.worker.execute(task.restaurantId);
 
         await this.queueRepo.completeTask(task.id);
-        console.log('✅ Aggregation task completed');
+        taskLog.info('Aggregation task completed');
 
         const stats = await this.queueRepo.getQueueStats();
-        console.log(
-          `\n📊 Queue Stats → Pending: ${stats.pending}, Processing: ${stats.processing}, Completed: ${stats.completed}`,
+        log.debug(
+          {
+            pending: stats.pending,
+            processing: stats.processing,
+            completed: stats.completed,
+          },
+          'Queue stats',
         );
 
         await this.sleep(2_000);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        console.error('\n❌ Aggregation task failed:', message);
+        const errorLog = task
+          ? log.child({ taskId: task.id, restaurantId: task.restaurantId })
+          : log;
+        errorLog.error({ error: message, stack: error instanceof Error ? error.stack : undefined }, 'Aggregation task failed');
 
         if (task) {
           await this.queueRepo.failTask(task.id, message);
@@ -80,7 +110,30 @@ export class FeatureAggregationQueueProcessor {
       }
     }
 
-    console.log('\n🛑 Feature aggregation worker stopped');
+    log.info('Feature aggregation worker stopped');
+  }
+
+  private async checkAndResetStuckTasks(log: ReturnType<typeof logger.child>): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastRecoveryCheck < this.recoveryCheckInterval) {
+      return;
+    }
+
+    this.lastRecoveryCheck = now;
+
+    try {
+      const resetCount = await this.queueRepo.resetStuckTasks();
+      if (resetCount > 0) {
+        log.warn({ resetCount }, 'Reset stuck tasks');
+      }
+    } catch (error) {
+      log.error(
+        {
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Failed to reset stuck tasks',
+      );
+    }
   }
 
   stop(): void {
@@ -103,7 +156,12 @@ if (require.main === module) {
     try {
       await closePool();
     } catch (error) {
-      console.error('Failed to close database pool:', error);
+      logger.error(
+        {
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Failed to close database pool',
+      );
     } finally {
       process.exit(code);
     }

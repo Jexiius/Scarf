@@ -5,6 +5,7 @@ import { requireAuth } from '../middleware/auth';
 import { SavedRestaurantsService } from '../services/saved-restaurants.service';
 import { UserRepository } from '../repositories/user.repository';
 import { UserQueryRepository } from '../repositories/user-query.repository';
+import { mapUserToDto } from '../mappers/user.mapper';
 import type { AppBindings } from '../types/app';
 
 const savedRestaurantsService = new SavedRestaurantsService();
@@ -41,8 +42,8 @@ userRouter.get('/me', async (c) => {
     return c.json({ error: 'User not found' }, 404);
   }
 
-  const { passwordHash: _passwordHash, ...rest } = user;
-  return c.json({ user: rest });
+  const userDto = mapUserToDto(user);
+  return c.json({ user: userDto });
 });
 
 userRouter.get('/me/saved', async (c) => {
